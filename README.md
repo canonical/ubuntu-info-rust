@@ -9,6 +9,10 @@ components, machine architectures, and archive locations. The crate performs no
 network requests and reads no system files. Series lookups use compile-time
 perfect hash maps, so they are O(1) in the number of series.
 
+All public types implement serde's `Serialize` and `Deserialize` traits when
+the optional `serde` feature is enabled, so they can be used directly in
+configuration files and other serialized formats.
+
 ## Installation
 
 Add the crate to `Cargo.toml`:
@@ -16,6 +20,14 @@ Add the crate to `Cargo.toml`:
 ```toml
 [dependencies]
 ubuntu-info-rust = "0.1"
+```
+
+Enable the optional `serde` feature to serialize and deserialize the crate's
+types:
+
+```toml
+[dependencies]
+ubuntu-info-rust = { version = "0.1", features = ["serde"] }
 ```
 
 For local development against a checkout, use a path dependency:
@@ -248,12 +260,15 @@ for architecture in Architecture::ALL {
 ```
 
 `i386` is included as a partial port and reports
-`is_officially_supported() == false`.
+`is_officially_supported() == false`. `amd64v3` is the `x86-64-v3` architecture
+variant introduced in Ubuntu 25.10 and is officially supported.
 
 ### Build archive URLs
 
 `Archive` keeps archive hostnames as data and builds the documented
-`dists/<suite>/<component>/binary-<arch>/` layout:
+`dists/<suite>/<component>/binary-<arch>/` layout. The primary archive hosts
+`amd64`, `amd64v3`, and `i386`; the ports archive hosts `arm64`, `armhf`,
+`ppc64el`, `riscv64`, and `s390x`.
 
 ```rust
 use ubuntu_info_rust::{Architecture, Archive, Component, Pocket, SeriesInfo, Suite};
@@ -269,8 +284,13 @@ assert_eq!(
 );
 
 assert_eq!(
-    Archive::Primary.dists_url(&suite, Component::Universe, Architecture::Arm64),
-    "http://archive.ubuntu.com/ubuntu/dists/resolute-security/universe/binary-arm64/"
+    Archive::Primary.dists_url(&suite, Component::Universe, Architecture::Amd64v3),
+    "http://archive.ubuntu.com/ubuntu/dists/resolute-security/universe/binary-amd64v3/"
+);
+
+assert_eq!(
+    Archive::Ports.dists_url(&suite, Component::Main, Architecture::Arm64),
+    "http://ports.ubuntu.com/ubuntu-ports/dists/resolute-security/main/binary-arm64/"
 );
 
 assert_eq!(
@@ -278,6 +298,76 @@ assert_eq!(
     "http://fi.archive.ubuntu.com/ubuntu"
 );
 ```
+
+Each architecture also knows which archive hosts it, so you can build URLs
+without choosing an `Archive` yourself:
+
+```rust
+use ubuntu_info_rust::{Architecture, Component, Pocket, SeriesInfo, Suite};
+
+let suite = Suite::new(
+    SeriesInfo::from_version("26.04 LTS").unwrap(),
+    Pocket::Security,
+);
+
+assert_eq!(
+    Architecture::Amd64.archive_url(),
+    "http://archive.ubuntu.com/ubuntu"
+);
+assert_eq!(
+    Architecture::Amd64v3.archive_url(),
+    "http://archive.ubuntu.com/ubuntu"
+);
+assert_eq!(
+    Architecture::Arm64.archive_url(),
+    "http://ports.ubuntu.com/ubuntu-ports"
+);
+assert_eq!(
+    Architecture::Arm64.security_archive_url(),
+    "http://ports.ubuntu.com/ubuntu-ports"
+);
+
+assert_eq!(
+    Architecture::Arm64.dists_url(&suite, Component::Main),
+    "http://ports.ubuntu.com/ubuntu-ports/dists/resolute-security/main/binary-arm64/"
+);
+assert_eq!(
+    Architecture::Amd64.security_dists_url(&suite, Component::Main),
+    "http://security.ubuntu.com/ubuntu/dists/resolute-security/main/binary-amd64/"
+);
+```
+
+### Serialize and deserialize
+
+With the optional `serde` feature enabled, all public types implement serde's
+`Serialize` and `Deserialize` traits. Enums use their canonical identifiers, and
+`Date` uses the `YYYY-MM-DD` form:
+
+```rust
+use ubuntu_info_rust::{Architecture, Date, Pocket, Suite};
+
+assert_eq!(
+    serde_json::to_string(&Architecture::Amd64v3).unwrap(),
+    "\"amd64v3\""
+);
+assert_eq!(
+    serde_json::to_string(&Pocket::Security).unwrap(),
+    "\"security\""
+);
+assert_eq!(
+    serde_json::to_string(&Date::new(2026, 4, 23)).unwrap(),
+    "\"2026-04-23\""
+);
+
+let suite: Suite = "jammy-security".parse().unwrap();
+let json = serde_json::to_string(&suite).unwrap();
+assert_eq!(serde_json::from_str::<Suite>(&json).unwrap(), suite);
+```
+
+`SeriesInfo` and `Suite` contain `&'static` references. Deserializing them
+resolves the series against the built-in data, so the input must describe a
+known series exactly. Deserializing `Archive::Country` allocates and leaks the
+country code so it can be stored with a `'static` lifetime.
 
 ## API overview
 
@@ -290,7 +380,7 @@ assert_eq!(
 | `Architecture` | Supported machine architectures |
 | `Endianness` | Little- or big-endian |
 | `Suite` | A series plus a pocket |
-| `Archive` | Primary, security, or country-mirror archive |
+| `Archive` | Primary, security, ports, or country-mirror archive |
 | `Date` | Dependency-free calendar date |
 | `ParseError` | Descriptive parsing error |
 
@@ -314,6 +404,17 @@ Key `SeriesInfo` methods:
 | `is_esm_on(date)` | Whether the series is in ESM on a date |
 | `is_legacy_on(date)` | Whether the series is in legacy support on a date |
 | `is_end_of_life_on(date)` | Whether the series is end-of-life on a date |
+
+Key `Architecture` methods:
+
+| Method | Returns |
+| --- | --- |
+| `archive()` | The primary `Archive` that hosts the architecture |
+| `security_archive()` | The security `Archive` that hosts the architecture |
+| `archive_url()` | The base URL of the architecture's primary archive |
+| `security_archive_url()` | The base URL of the architecture's security archive |
+| `dists_url(suite, component)` | The full primary-archive URL for a suite and component |
+| `security_dists_url(suite, component)` | The full security-archive URL for a suite and component |
 
 ## Performance
 
@@ -399,6 +500,6 @@ cargo test --locked --doc
 cargo audit
 ```
 
-The crate's only runtime dependency is `phf`, used for compile-time perfect
-hash maps. `cargo audit` is still part of the repository's pre-commit hook and
-CI workflow.
+The crate's only required runtime dependency is `phf`, used for compile-time
+perfect hash maps. `serde` is optional and enabled with the `serde` feature.
+`cargo audit` is still part of the repository's pre-commit hook and CI workflow.

@@ -115,19 +115,25 @@ source definition, not only closed-source software.
 ### Architectures
 
 The crate models the officially supported machine architectures (`amd64`,
-`arm64`, `armhf`, `ppc64el`, `riscv64`, `s390x`) plus the partial `i386` port.
-`Architecture::is_officially_supported()` returns `false` for `i386`.
+`amd64v3`, `arm64`, `armhf`, `ppc64el`, `riscv64`, `s390x`) plus the partial
+`i386` port. `Architecture::is_officially_supported()` returns `false` for
+`i386`. `amd64v3` is the `x86-64-v3` architecture variant introduced in Ubuntu
+25.10.
 
 ### Archive locations
 
 - Primary archive: `http://archive.ubuntu.com/ubuntu`
 - Security updates: `http://security.ubuntu.com/ubuntu` (same servers, separate
   hostname so the security pocket is not accidentally redirected to a mirror)
+- Ports archive: `http://ports.ubuntu.com/ubuntu-ports` for `arm64`, `armhf`,
+  `ppc64el`, `riscv64`, and `s390x`
 - Country mirrors: `<country-code>.archive.ubuntu.com`
 - Distribution layout: `dists/<suite>/<component>/binary-<arch>/`
 
 URLs and hostnames are data in `src/archive.rs`, not hard-coded string
-concatenation scattered through the code.
+concatenation scattered through the code. `Archive::for_architecture` and
+`Archive::security_for_architecture` map each architecture to the archive that
+hosts it.
 
 ## Implemented API
 
@@ -238,6 +244,7 @@ pub enum Component {
 ```rust
 pub enum Architecture {
     Amd64,
+    Amd64v3,
     Arm64,
     Armhf,
     I386,
@@ -256,6 +263,12 @@ pub enum Endianness {
 - `Architecture::as_str()` returns the canonical identifier.
 - `Architecture::endianness()` returns the byte order.
 - `Architecture::is_officially_supported()` returns `false` for `I386`.
+- `Architecture::archive()` and `security_archive()` return the `Archive` that
+  hosts the architecture.
+- `Architecture::archive_url()` and `security_archive_url()` return the base
+  URLs for the architecture.
+- `Architecture::dists_url(suite, component)` and
+  `security_dists_url(suite, component)` return full archive URLs.
 - Implements `Display` and `FromStr`.
 
 ### `Suite`
@@ -277,12 +290,18 @@ pub struct Suite {
 pub enum Archive {
     Primary,
     Security,
+    Ports,
     Country(&'static str),
 }
 ```
 
-- `Archive::PRIMARY_URL` and `Archive::SECURITY_URL` expose the base URLs.
+- `Archive::PRIMARY_URL`, `Archive::SECURITY_URL`, and `Archive::PORTS_URL`
+  expose the base URLs.
 - `Archive::country(code)` constructs a country mirror.
+- `Archive::for_architecture(architecture)` returns the primary archive that
+  hosts the architecture.
+- `Archive::security_for_architecture(architecture)` returns the security
+  archive that hosts the architecture.
 - `base_url()` returns the archive base URL.
 - `dists_path(suite, component, architecture)` returns
   `dists/<suite>/<component>/binary-<arch>/`.
@@ -303,6 +322,13 @@ pub enum Archive {
 `ParseError` is returned by `FromStr` implementations for pockets, components,
 architectures, suites, and dates. It implements `Display` and
 `std::error::Error`.
+
+All public types implement serde's `Serialize` and `Deserialize` traits when
+the optional `serde` feature is enabled. Enums serialize as their canonical
+identifiers, and `Date` serializes as `YYYY-MM-DD`. `SeriesInfo` and `Suite`
+deserialize by resolving against the built-in series data, so the input must
+describe a known series exactly. `Archive::Country` deserialization allocates
+and leaks the country code so it can be stored with a `'static` lifetime.
 
 ## Data maintenance
 
@@ -342,8 +368,9 @@ src/archive.rs                Archive locations and URL construction
 src/date.rs                   Date type
 src/error.rs                  ParseError
 tests/public_api.rs           Public API integration tests
+tests/serde.rs                Serde round-trip tests (requires the serde feature)
 examples/                     Runnable usage examples
-Cargo.toml                    Crate manifest (edition 2024; phf for static lookup maps)
+Cargo.toml                    Crate manifest (edition 2024; phf required, serde optional)
 Cargo.lock                    Must be committed; CI builds with --locked
 git-hooks/pre-commit          Tests, clippy, fmt, docs, and cargo audit
 git-hooks/setup-hooks.sh      Symlinks hooks into .git/hooks
@@ -396,9 +423,9 @@ Notes:
 - Keep data `const`/`static` and free of runtime I/O. This crate must not perform
   network requests or read system files.
 - Avoid unnecessary dependencies. If one is justified, prefer a small,
-  well-maintained crate and update `Cargo.lock`. `phf` is the one justified
+  well-maintained crate and update `Cargo.lock`. `phf` is the one required
   dependency: it provides compile-time perfect hash maps for O(1) series
-  lookups.
+  lookups. `serde` is optional and enabled with the `serde` feature.
 - Keep the lookup maps in `src/series.rs` in sync with `SERIES`. The tests
   verify that every map entry points at the correct series.
 - Use `&'static str` for fixed identifiers and archive URLs unless a richer type

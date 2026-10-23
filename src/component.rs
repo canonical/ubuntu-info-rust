@@ -1,6 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 use crate::error::ParseError;
 
 /// A component within an Ubuntu suite.
@@ -8,6 +11,8 @@ use crate::error::ParseError;
 /// Components subdivide packages by whether they are open source and whether
 /// they are part of the Ubuntu base or the community.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "lowercase"))]
 pub enum Component {
     /// Open source packages maintained by Canonical.
     Main,

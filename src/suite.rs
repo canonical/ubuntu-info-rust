@@ -1,6 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 use crate::error::ParseError;
 use crate::pocket::Pocket;
 use crate::series::SeriesInfo;
@@ -10,11 +13,46 @@ use crate::series::SeriesInfo;
 /// The `release` pocket has no suffix. All other pockets append `-<pocket>` to
 /// the series name, for example `jammy-security`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct Suite {
     /// The series this suite belongs to.
     pub series: &'static SeriesInfo,
     /// The pocket within the series.
     pub pocket: Pocket,
+}
+
+/// The owned representation used to deserialize [`Suite`].
+///
+/// [`Suite`] stores a `&'static SeriesInfo`, which serde cannot deserialize
+/// directly. Deserialization resolves the series against the built-in series
+/// data instead of allocating a new one.
+#[cfg(feature = "serde")]
+#[derive(Deserialize)]
+struct SuiteOwned {
+    series: SeriesInfo,
+    pocket: Pocket,
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<SuiteOwned> for Suite {
+    type Error = String;
+
+    fn try_from(owned: SuiteOwned) -> Result<Self, Self::Error> {
+        let series = SeriesInfo::from_short_name(owned.series.code_name_short)
+            .ok_or_else(|| format!("unknown Ubuntu series: {}", owned.series.code_name_short))?;
+        Ok(Self::new(series, owned.pocket))
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for Suite {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let owned = SuiteOwned::deserialize(deserializer)?;
+        Suite::try_from(owned).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Suite {

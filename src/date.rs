@@ -1,6 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 use crate::error::ParseError;
 
 /// A calendar date.
@@ -9,6 +12,8 @@ use crate::error::ParseError;
 /// specifies a month, use [`Date::year_month`] for the first day of the month or
 /// [`Date::end_of_month`] for the last day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "String", into = "String"))]
 pub struct Date {
     year: u16,
     month: u8,
@@ -74,6 +79,22 @@ const fn days_in_month(year: u16, month: u8) -> u8 {
 impl fmt::Display for Date {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl From<Date> for String {
+    fn from(date: Date) -> Self {
+        date.to_string()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<String> for Date {
+    type Error = ParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
     }
 }
 
