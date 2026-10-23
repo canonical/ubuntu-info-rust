@@ -2,6 +2,9 @@
 name = "ubuntu-info-rust"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/canonical/ubuntu-info-rust"
+description = "Ubuntu distribution information modeled for Rust applications"
 
 [dependencies]
 phf = { version = "0.14", features = ["macros"] }
