@@ -12,7 +12,17 @@ fn main() {
     let resolute = SeriesInfo::from_version("26.04 LTS").expect("known series");
     let security = Suite::new(resolute, Pocket::Security);
 
-    println!("Security archive, amd64:");
+    println!("Archive used by each architecture:");
+    for architecture in Architecture::ALL {
+        println!(
+            "  {:<8} primary={} security={}",
+            architecture,
+            architecture.archive_url(),
+            architecture.security_archive_url()
+        );
+    }
+
+    println!("\nSecurity archive, amd64:");
     for component in Component::ALL {
         println!(
             "  {}",
@@ -20,10 +30,10 @@ fn main() {
         );
     }
 
-    println!("\nPrimary archive, arm64:");
+    println!("\nPrimary archive, arm64 (ports):");
     println!(
         "  {}",
-        Archive::Primary.dists_url(&security, Component::Main, Architecture::Arm64)
+        Architecture::Arm64.dists_url(&security, Component::Main)
     );
 
     println!("\nCountry mirror (Finland), riscv64:");

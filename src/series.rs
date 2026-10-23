@@ -1,6 +1,8 @@
 use std::fmt;
 
 use phf::phf_map;
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 
 use crate::date::Date;
 
@@ -18,6 +20,7 @@ pub const REFERENCE_DATE: Date = Date::new(2026, 10, 20);
 /// same as a release: an LTS series has an initial release plus point releases,
 /// all of which belong to the same series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct SeriesInfo {
     /// The full code name, for example `"Stonking Stingray"`.
     pub code_name: &'static str,
@@ -41,6 +44,8 @@ pub struct SeriesInfo {
 
 /// The lifecycle phase of a series on a given date.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Lifecycle {
     /// The series has not been released yet and is in development.
     Development,
@@ -52,6 +57,65 @@ pub enum Lifecycle {
     LegacySupport,
     /// The series is no longer supported.
     EndOfLife,
+}
+
+/// The owned representation used to deserialize [`SeriesInfo`].
+///
+/// [`SeriesInfo`] stores its identifiers as `&'static str`, which serde cannot
+/// deserialize directly. Deserialization resolves the series against the
+/// built-in [`SERIES`] data instead of allocating new strings, so the input must
+/// describe a known series exactly.
+#[cfg(feature = "serde")]
+#[derive(Deserialize)]
+struct SeriesInfoOwned {
+    code_name: String,
+    code_name_short: String,
+    version: String,
+    release_date: Date,
+    end_of_standard_support: Date,
+    end_of_life: Date,
+    esm_start: Option<Date>,
+    legacy_start: Option<Date>,
+    is_lts: bool,
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<SeriesInfoOwned> for SeriesInfo {
+    type Error = String;
+
+    fn try_from(owned: SeriesInfoOwned) -> Result<Self, Self::Error> {
+        let series = SeriesInfo::from_short_name(&owned.code_name_short)
+            .ok_or_else(|| format!("unknown Ubuntu series: {}", owned.code_name_short))?;
+
+        let matches = owned.code_name == series.code_name
+            && owned.version == series.version
+            && owned.release_date == series.release_date
+            && owned.end_of_standard_support == series.end_of_standard_support
+            && owned.end_of_life == series.end_of_life
+            && owned.esm_start == series.esm_start
+            && owned.legacy_start == series.legacy_start
+            && owned.is_lts == series.is_lts;
+
+        if matches {
+            Ok(*series)
+        } else {
+            Err(format!(
+                "series data for {} does not match the built-in data",
+                owned.code_name_short
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for SeriesInfo {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let owned = SeriesInfoOwned::deserialize(deserializer)?;
+        SeriesInfo::try_from(owned).map_err(serde::de::Error::custom)
+    }
 }
 
 impl SeriesInfo {

@@ -1,6 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 use crate::error::ParseError;
 
 /// A pocket within an Ubuntu series.
@@ -8,6 +11,8 @@ use crate::error::ParseError;
 /// Every series has five pockets. The `release` pocket has no suite suffix; the
 /// other pockets append `-<pocket>` to the series name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "lowercase"))]
 pub enum Pocket {
     /// Packages the series shipped with. Frozen after the initial release.
     Release,

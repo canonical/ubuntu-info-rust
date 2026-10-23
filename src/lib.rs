@@ -6,6 +6,12 @@
 //! files. Series lookups use compile-time perfect hash maps and are O(1) in the
 //! number of series.
 //!
+//! With the `serde` feature enabled, all public types implement serde's
+//! `Serialize` and `Deserialize` traits. Enums serialize as their canonical
+//! identifiers, and [`Date`] serializes as `YYYY-MM-DD`. [`SeriesInfo`] and
+//! [`Suite`] deserialize by resolving against the built-in series data, so the
+//! input must describe a known series exactly.
+//!
 //! # Example
 //!
 //! ```
