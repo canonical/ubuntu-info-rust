@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt;
 
 use phf::phf_map;
@@ -43,7 +44,9 @@ pub struct SeriesInfo {
 }
 
 /// The lifecycle phase of a series on a given date.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Variants are ordered from development through end of life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Lifecycle {
@@ -115,6 +118,41 @@ impl<'de> Deserialize<'de> for SeriesInfo {
     {
         let owned = SeriesInfoOwned::deserialize(deserializer)?;
         SeriesInfo::try_from(owned).map_err(serde::de::Error::custom)
+    }
+}
+
+impl PartialOrd for SeriesInfo {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SeriesInfo {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Compare release dates first. The remaining fields are tie-breakers so
+        // that the ordering is consistent with the derived `Eq` implementation.
+        (
+            self.release_date,
+            self.version,
+            self.code_name_short,
+            self.code_name,
+            self.end_of_standard_support,
+            self.end_of_life,
+            self.esm_start,
+            self.legacy_start,
+            self.is_lts,
+        )
+            .cmp(&(
+                other.release_date,
+                other.version,
+                other.code_name_short,
+                other.code_name,
+                other.end_of_standard_support,
+                other.end_of_life,
+                other.esm_start,
+                other.legacy_start,
+                other.is_lts,
+            ))
     }
 }
 
@@ -1069,7 +1107,21 @@ mod tests {
                 pair[0].code_name_short,
                 pair[1].code_name_short
             );
+            assert!(
+                pair[0] < pair[1],
+                "{} does not sort before {}",
+                pair[0].code_name_short,
+                pair[1].code_name_short
+            );
         }
+    }
+
+    #[test]
+    fn lifecycle_phases_are_ordered() {
+        assert!(Lifecycle::Development < Lifecycle::StandardSupport);
+        assert!(Lifecycle::StandardSupport < Lifecycle::ExpandedSecurityMaintenance);
+        assert!(Lifecycle::ExpandedSecurityMaintenance < Lifecycle::LegacySupport);
+        assert!(Lifecycle::LegacySupport < Lifecycle::EndOfLife);
     }
 
     #[test]

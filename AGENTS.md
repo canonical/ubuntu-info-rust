@@ -153,6 +153,9 @@ pub struct SeriesInfo {
 }
 ```
 
+`SeriesInfo` implements `Ord` by `release_date`, with the remaining fields as
+tie-breakers so the ordering is consistent with `Eq`.
+
 Lookups:
 
 - `SeriesInfo::from_version(input)` accepts `"26.04"`, `"26.04 LTS"`,
@@ -204,6 +207,8 @@ pub enum Lifecycle {
     EndOfLife,
 }
 ```
+
+Variants are ordered from `Development` through `EndOfLife`.
 
 ### `Pocket`
 
@@ -282,6 +287,7 @@ pub struct Suite {
 
 - `Suite::new(series, pocket)` constructs a suite.
 - `Suite::devel(pocket)` constructs a suite for the development series.
+- Implements `Ord` by the `series` field, then the `pocket` field.
 - Implements `Display` and `FromStr`.
 
 ### `Archive`

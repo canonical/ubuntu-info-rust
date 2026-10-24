@@ -139,6 +139,20 @@ fn archive_urls_use_the_documented_layout() {
 }
 
 #[test]
+fn series_and_suites_are_ordered() {
+    let jammy = SeriesInfo::from_version("22.04").unwrap();
+    let noble = SeriesInfo::from_version("24.04").unwrap();
+    assert!(jammy < noble);
+
+    let jammy_release: Suite = "jammy".parse().unwrap();
+    let jammy_security: Suite = "jammy-security".parse().unwrap();
+    let noble_release: Suite = "noble".parse().unwrap();
+
+    assert!(jammy_release < jammy_security);
+    assert!(jammy_security < noble_release);
+}
+
+#[test]
 fn dates_are_inclusive_at_phase_boundaries() {
     let xenial = SeriesInfo::from_version("16.04").unwrap();
 
