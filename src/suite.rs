@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 
@@ -52,6 +53,20 @@ impl<'de> Deserialize<'de> for Suite {
     {
         let owned = SuiteOwned::deserialize(deserializer)?;
         Suite::try_from(owned).map_err(serde::de::Error::custom)
+    }
+}
+
+impl PartialOrd for Suite {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Suite {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.series
+            .cmp(other.series)
+            .then_with(|| self.pocket.cmp(&other.pocket))
     }
 }
 
@@ -129,5 +144,16 @@ mod tests {
             "jammy-unknown".parse::<Suite>(),
             Err(ParseError::UnknownPocket(_))
         ));
+    }
+
+    #[test]
+    fn suites_are_ordered_by_series_then_pocket() {
+        let jammy_release: Suite = "jammy".parse().unwrap();
+        let jammy_security: Suite = "jammy-security".parse().unwrap();
+        let noble_release: Suite = "noble".parse().unwrap();
+
+        assert!(jammy_release < jammy_security);
+        assert!(jammy_security < noble_release);
+        assert!(jammy_release < noble_release);
     }
 }

@@ -162,6 +162,9 @@ assert_eq!(
 );
 ```
 
+`SeriesInfo` implements `Ord` by release date, so series sort chronologically.
+`Lifecycle` variants are ordered from development through end of life.
+
 ### Iterate series groups
 
 The crate provides iterators for the groups used by the Ubuntu release
@@ -233,6 +236,9 @@ assert_eq!(devel.pocket, Pocket::Security);
 let parsed: Suite = "devel-security".parse().unwrap();
 assert_eq!(parsed, devel);
 ```
+
+`Suite` implements `Ord` by its series, then its pocket, so suites sort by
+release date and then by pocket order.
 
 ### Work with components and architectures
 
