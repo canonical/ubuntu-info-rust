@@ -19,7 +19,7 @@ Add the crate to `Cargo.toml`:
 
 ```toml
 [dependencies]
-ubuntu-info-rust = "0.1"
+ubuntu-info-rust = "0.3"
 ```
 
 Enable the optional `serde` feature to serialize and deserialize the crate's
