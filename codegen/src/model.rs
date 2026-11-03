@@ -98,7 +98,7 @@ pub fn derive(csv_text: &str) -> Result<Dataset, String> {
         rows.push(derive_row(record)?);
     }
 
-    rows.sort_by(|a, b| a.series.release_date.cmp(&b.series.release_date));
+    rows.sort_by_key(|a| a.series.release_date);
     for pair in rows.windows(2) {
         if pair[0].series.release_date == pair[1].series.release_date {
             return Err(format!(

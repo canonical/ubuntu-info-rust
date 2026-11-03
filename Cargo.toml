@@ -5,6 +5,7 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/canonical/ubuntu-info-rust"
 description = "Ubuntu distribution information modeled for Rust applications"
+rust-version = "1.93.1"
 
 [features]
 serde = ["dep:serde"]
