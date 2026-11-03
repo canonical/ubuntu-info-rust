@@ -32,6 +32,7 @@ Authoritative references for the domain:
 | `src/archive.rs` | `Archive` locations and URL construction |
 | `src/date.rs` | Dependency-free `Date` type |
 | `src/error.rs` | `ParseError` |
+| `codegen/` | Generates `src/series.rs` from `distro-info-data`'s `ubuntu.csv` |
 | `tests/public_api.rs` | Public API integration tests |
 | `examples/` | Runnable usage examples |
 
@@ -338,34 +339,57 @@ and leaks the country code so it can be stored with a `'static` lifetime.
 
 ## Data maintenance
 
-The series data lives in `SERIES` in `src/series.rs`. When updating it:
+The series data in `SERIES` in `src/series.rs` is **generated** from the
+`distro-info-data` package's `ubuntu.csv` by the `codegen` workspace member. Do
+not edit it by hand. To regenerate it:
 
-1. Keep entries in release-date order.
-2. Update the `VERSION_INDEX`, `SHORT_NAME_INDEX`, and `FULL_NAME_INDEX` maps so
-   each key points at the correct index in `SERIES`.
-3. Update `DEVEL_INDEX` if the development series changes.
-4. Update `REFERENCE_DATE` when the data has been re-verified. The "current"
-   iterators use this date.
-5. Use `Date::year_month` for month-precision start dates and
-   `Date::end_of_month` for month-precision end dates.
-6. Keep lifecycle dates consistent:
-   - `release_date <= end_of_standard_support <= end_of_life`
-   - `esm_start <= end_of_life`
-   - `legacy_start <= end_of_life`
-7. Run the test suite. The tests enforce unique versions, short names, and full
-   names, release-date order, lifecycle-date consistency, and lookup-map
-   consistency.
-8. Update `README.md` and any affected examples when the public API or supported
-   data changes.
+```sh
+curl -o ubuntu.csv \
+  "https://git.launchpad.net/ubuntu/+source/distro-info-data/plain/ubuntu.csv"
+cargo run --package codegen -- ubuntu.csv src/series.rs
+cargo fmt
+```
 
-For LTS series before 12.04, the server lifecycle is used. `i386` is modeled as a
-partial port.
+The generator is idempotent: its output is a pure function of `ubuntu.csv`, so
+regenerating an up-to-date file leaves it unchanged. The
+`.github/workflows/update-distro-data.yaml` workflow runs weekly and opens a
+pull request only when the upstream data has changed.
+
+The generator refuses to drop series that are present in the existing file, so a
+truncated or stale `ubuntu.csv` cannot silently delete data. Pass
+`--allow-removals` if a removal is intentional.
+
+The generator derives each `SeriesInfo` from a `ubuntu.csv` row:
+
+- `version` is the CSV version with the ` LTS` suffix removed, and `is_lts` is
+  whether the suffix was present.
+- `release_date` is the `release` column.
+- `end_of_standard_support` is `eol-server` when present, otherwise `eol`. For
+  LTS series before 12.04 the server lifecycle is the standard support period.
+- `end_of_life` is the last end date present: `eol-legacy`, then `eol-esm`, then
+  `eol-server`, then `eol`.
+- `esm_start` is the end of standard support, for series that have an `eol-esm`
+  date: ESM begins when standard support ends.
+- `legacy_start` is the first day of the month in which ESM ends, for series
+  that have an `eol-legacy` date.
+- `REFERENCE_DATE` is the newest `created` date in the file. The "current"
+  iterators use this date.
+
+The generator validates the derived data: unique versions, short names, and full
+names; strict release-date order; and lifecycle-date consistency
+(`release_date <= end_of_standard_support <= end_of_life`,
+`esm_start <= end_of_life`, `legacy_start <= end_of_life`). The generated file's
+tests enforce the same invariants, so run the test suite after regenerating.
+Update `README.md` and any affected examples when the public API or supported
+data changes.
+
+`i386` is modeled as a partial port.
 
 ## Repository layout
 
 ```
 src/lib.rs                    Library root and public API
-src/series.rs                 Series data, lookups, lifecycle, iterators
+src/series.rs                 Series data, lookups, lifecycle, iterators (generated)
 src/pocket.rs                 Pocket enum
 src/component.rs              Component enum
 src/architecture.rs           Architecture and Endianness enums
@@ -376,11 +400,13 @@ src/error.rs                  ParseError
 tests/public_api.rs           Public API integration tests
 tests/serde.rs                Serde round-trip tests (requires the serde feature)
 examples/                     Runnable usage examples
-Cargo.toml                    Crate manifest (edition 2024; phf required, serde optional)
+codegen/                      Idempotent generator for src/series.rs from ubuntu.csv
+Cargo.toml                    Workspace root; crate manifest (edition 2024; phf required, serde optional)
 Cargo.lock                    Must be committed; CI builds with --locked
 git-hooks/pre-commit          Tests, clippy, fmt, docs, and cargo audit
 git-hooks/setup-hooks.sh      Symlinks hooks into .git/hooks
-.github/workflows/            Build, lint, docs, test, and audit on pull requests
+.github/workflows/            Build, lint, docs, test, and audit on pull requests;
+                              weekly distro-info-data sync (update-distro-data.yaml)
 .devcontainer/                Canonical Ubuntu Rust devcontainer
 ```
 
@@ -396,11 +422,11 @@ Run the same checks locally that CI runs:
 
 ```sh
 cargo fmt -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
-cargo build --locked --all-targets --all-features
-cargo test --locked --all-targets --all-features
-cargo test --locked --doc
+cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps --all-features
+cargo build --workspace --locked --all-targets --all-features
+cargo test --workspace --locked --all-targets --all-features
+cargo test --workspace --locked --doc
 cargo audit
 ```
 
@@ -417,6 +443,8 @@ Notes:
   tracked filenames.
 - `cargo build --all-targets` and `cargo clippy --all-targets` also build and
   lint the examples.
+- CI and the hooks run with `--workspace` so the `codegen` package is built,
+  linted, and tested alongside the crate.
 
 ## Code conventions
 
@@ -441,7 +469,8 @@ Notes:
 - Keep the series/pocket/suite distinctions explicit in names; avoid using
   "release" for a series or "repository" for a suite.
 - Use `Date` for all dates. Do not store dates as strings or Unix timestamps.
-- Keep `SERIES` sorted by release date and free of duplicate identifiers.
+- Keep `SERIES` sorted by release date and free of duplicate identifiers. The
+  generator enforces this; do not hand-edit the generated data.
 
 ## Testing
 
@@ -453,8 +482,8 @@ Notes:
 - Prefer unit tests in the module under test; add integration tests under
   `tests/` for the public API.
 - Keep the examples in `examples/` compiling and warning-free.
-- Run `cargo test --locked --all-targets --all-features` and
-  `cargo test --locked --doc` before finishing.
+- Run `cargo test --workspace --locked --all-targets --all-features` and
+  `cargo test --workspace --locked --doc` before finishing.
 
 ## Examples
 

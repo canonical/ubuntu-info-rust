@@ -1,0 +1,652 @@
+use std::cmp::Ordering;
+use std::fmt;
+
+use phf::phf_map;
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
+use crate::date::Date;
+
+/// The date against which the "current" iterators are evaluated.
+///
+/// The crate contains static data and performs no I/O, so it cannot discover the
+/// current date at runtime. This constant is derived from the upstream data: the
+/// date the most recent series was created in `distro-info-data`. Use the
+/// `*_on` methods to evaluate a lifecycle phase on a different date.
+pub const REFERENCE_DATE: Date = Date::new(@@REFERENCE_DATE@@);
+
+/// Information about an Ubuntu series.
+///
+/// A series is the set of packages targeting one Ubuntu version. It is not the
+/// same as a release: an LTS series has an initial release plus point releases,
+/// all of which belong to the same series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub struct SeriesInfo {
+    /// The full code name, for example `"Stonking Stingray"`.
+    pub code_name: &'static str,
+    /// The short code name used in suites, for example `"stonking"`.
+    pub code_name_short: &'static str,
+    /// The version, for example `"26.10"`.
+    pub version: &'static str,
+    /// The date of the initial release.
+    pub release_date: Date,
+    /// The last day of standard support.
+    pub end_of_standard_support: Date,
+    /// The last day of support, including ESM and legacy support where applicable.
+    pub end_of_life: Date,
+    /// The last day of standard support, after which Expanded Security
+    /// Maintenance begins, if the series has ESM.
+    ///
+    /// Dates are inclusive, so the first day of ESM is the day after this date.
+    pub esm_start: Option<Date>,
+    /// The first day of Ubuntu Pro legacy support, if the series has it.
+    pub legacy_start: Option<Date>,
+    /// Whether the series is a Long Term Support (LTS) series.
+    pub is_lts: bool,
+}
+
+/// The lifecycle phase of a series on a given date.
+///
+/// Variants are ordered from development through end of life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum Lifecycle {
+    /// The series has not been released yet and is in development.
+    Development,
+    /// The series is within its standard support period.
+    StandardSupport,
+    /// The series is receiving Expanded Security Maintenance.
+    ExpandedSecurityMaintenance,
+    /// The series is receiving Ubuntu Pro legacy support.
+    LegacySupport,
+    /// The series is no longer supported.
+    EndOfLife,
+}
+
+/// The owned representation used to deserialize [`SeriesInfo`].
+///
+/// [`SeriesInfo`] stores its identifiers as `&'static str`, which serde cannot
+/// deserialize directly. Deserialization resolves the series against the
+/// built-in [`SERIES`] data instead of allocating new strings, so the input must
+/// describe a known series exactly.
+#[cfg(feature = "serde")]
+#[derive(Deserialize)]
+struct SeriesInfoOwned {
+    code_name: String,
+    code_name_short: String,
+    version: String,
+    release_date: Date,
+    end_of_standard_support: Date,
+    end_of_life: Date,
+    esm_start: Option<Date>,
+    legacy_start: Option<Date>,
+    is_lts: bool,
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<SeriesInfoOwned> for SeriesInfo {
+    type Error = String;
+
+    fn try_from(owned: SeriesInfoOwned) -> Result<Self, Self::Error> {
+        let series = SeriesInfo::from_short_name(&owned.code_name_short)
+            .ok_or_else(|| format!("unknown Ubuntu series: {}", owned.code_name_short))?;
+
+        let matches = owned.code_name == series.code_name
+            && owned.version == series.version
+            && owned.release_date == series.release_date
+            && owned.end_of_standard_support == series.end_of_standard_support
+            && owned.end_of_life == series.end_of_life
+            && owned.esm_start == series.esm_start
+            && owned.legacy_start == series.legacy_start
+            && owned.is_lts == series.is_lts;
+
+        if matches {
+            Ok(*series)
+        } else {
+            Err(format!(
+                "series data for {} does not match the built-in data",
+                owned.code_name_short
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for SeriesInfo {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let owned = SeriesInfoOwned::deserialize(deserializer)?;
+        SeriesInfo::try_from(owned).map_err(serde::de::Error::custom)
+    }
+}
+
+impl PartialOrd for SeriesInfo {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SeriesInfo {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Compare release dates first. The remaining fields are tie-breakers so
+        // that the ordering is consistent with the derived `Eq` implementation.
+        (
+            self.release_date,
+            self.version,
+            self.code_name_short,
+            self.code_name,
+            self.end_of_standard_support,
+            self.end_of_life,
+            self.esm_start,
+            self.legacy_start,
+            self.is_lts,
+        )
+            .cmp(&(
+                other.release_date,
+                other.version,
+                other.code_name_short,
+                other.code_name,
+                other.end_of_standard_support,
+                other.end_of_life,
+                other.esm_start,
+                other.legacy_start,
+                other.is_lts,
+            ))
+    }
+}
+
+impl SeriesInfo {
+    /// Returns every known series, ordered by release date.
+    pub fn all() -> impl Iterator<Item = &'static SeriesInfo> {
+        SERIES.iter()
+    }
+
+    /// Looks up a series by version.
+    ///
+    /// Accepts a plain version (`"26.04"`), an LTS suffix (`"26.04 LTS"`), an
+    /// optional `Ubuntu` prefix (`"Ubuntu 26.04 LTS"`), and point releases
+    /// (`"24.04.1 LTS"`), which resolve to their series. An LTS suffix or point
+    /// release is rejected for a series that is not an LTS.
+    pub fn from_version(input: &str) -> Option<&'static SeriesInfo> {
+        let input = input.trim();
+        let input = strip_prefix_ignore_ascii_case(input, "Ubuntu ").unwrap_or(input);
+        let (input, had_lts_suffix) = match strip_suffix_ignore_ascii_case(input, " LTS") {
+            Some(value) => (value, true),
+            None => (input, false),
+        };
+
+        let mut parts = input.split('.');
+        let major = parts.next()?;
+        let minor = parts.next()?;
+        if !is_numeric(major) || !is_numeric(minor) {
+            return None;
+        }
+
+        let mut had_point_release = false;
+        if let Some(point_release) = parts.next() {
+            if !is_numeric(point_release) || parts.next().is_some() {
+                return None;
+            }
+            had_point_release = true;
+        }
+
+        let version = format!("{major}.{minor}");
+        let index = *VERSION_INDEX.get(version.as_str())?;
+        let series = &SERIES[index];
+
+        if (had_lts_suffix || had_point_release) && !series.is_lts {
+            return None;
+        }
+
+        Some(series)
+    }
+
+    /// Looks up a series by code name.
+    ///
+    /// Accepts both the full code name (`"Stonking Stingray"`) and the short code
+    /// name (`"stonking"`). Matching is ASCII case-insensitive. The special name
+    /// `"devel"` resolves to the series currently in development.
+    pub fn from_code_name(input: &str) -> Option<&'static SeriesInfo> {
+        let input = input.trim();
+        if input.eq_ignore_ascii_case("devel") {
+            return Some(Self::devel());
+        }
+        let lower = input.to_ascii_lowercase();
+        let index = SHORT_NAME_INDEX
+            .get(lower.as_str())
+            .or_else(|| FULL_NAME_INDEX.get(lower.as_str()))?;
+        Some(&SERIES[*index])
+    }
+
+    /// Looks up a series by its short code name.
+    ///
+    /// Matching is ASCII case-insensitive. The special name `"devel"` resolves to
+    /// the series currently in development.
+    pub fn from_short_name(input: &str) -> Option<&'static SeriesInfo> {
+        let input = input.trim();
+        if input.eq_ignore_ascii_case("devel") {
+            return Some(Self::devel());
+        }
+        let lower = input.to_ascii_lowercase();
+        let index = *SHORT_NAME_INDEX.get(lower.as_str())?;
+        Some(&SERIES[index])
+    }
+
+    /// Returns the series currently in development, also called the future
+    /// release.
+    ///
+    /// This is the unreleased series with the earliest release date relative to
+    /// [`REFERENCE_DATE`].
+    pub fn devel() -> &'static SeriesInfo {
+        &SERIES[DEVEL_INDEX]
+    }
+
+    /// Returns the series that are currently supported, including standard
+    /// support, ESM, and legacy support.
+    ///
+    /// The future release is not included.
+    pub fn active() -> impl Iterator<Item = &'static SeriesInfo> {
+        SERIES
+            .iter()
+            .filter(|series| series.is_active_on(REFERENCE_DATE))
+    }
+
+    /// Returns the series that have entered Expanded Security Maintenance.
+    ///
+    /// This includes series that have since moved on to legacy support or end of
+    /// life, matching the upstream ESM table. Use [`SeriesInfo::current_esm`] for
+    /// the series currently in the ESM phase.
+    pub fn esm() -> impl Iterator<Item = &'static SeriesInfo> {
+        SERIES.iter().filter(|series| {
+            series
+                .esm_start
+                .is_some_and(|start| start <= REFERENCE_DATE)
+        })
+    }
+
+    /// Returns the series currently receiving Expanded Security Maintenance.
+    pub fn current_esm() -> impl Iterator<Item = &'static SeriesInfo> {
+        SERIES.iter().filter(|series| {
+            series.lifecycle_on(REFERENCE_DATE) == Lifecycle::ExpandedSecurityMaintenance
+        })
+    }
+
+    /// Returns the series that have entered Ubuntu Pro legacy support.
+    ///
+    /// Use [`SeriesInfo::current_legacy`] for the series currently in the legacy
+    /// support phase.
+    pub fn legacy() -> impl Iterator<Item = &'static SeriesInfo> {
+        SERIES.iter().filter(|series| {
+            series
+                .legacy_start
+                .is_some_and(|start| start <= REFERENCE_DATE)
+        })
+    }
+
+    /// Returns the series currently receiving Ubuntu Pro legacy support.
+    pub fn current_legacy() -> impl Iterator<Item = &'static SeriesInfo> {
+        SERIES
+            .iter()
+            .filter(|series| series.lifecycle_on(REFERENCE_DATE) == Lifecycle::LegacySupport)
+    }
+
+    /// Returns the series that have reached end of life.
+    pub fn end_of_life() -> impl Iterator<Item = &'static SeriesInfo> {
+        SERIES
+            .iter()
+            .filter(|series| series.lifecycle_on(REFERENCE_DATE) == Lifecycle::EndOfLife)
+    }
+
+    /// Returns the lifecycle phase of this series on `date`.
+    ///
+    /// Dates are inclusive: a series remains in a phase through the last day of
+    /// that phase.
+    pub fn lifecycle_on(&self, date: Date) -> Lifecycle {
+        if date < self.release_date {
+            Lifecycle::Development
+        } else if date <= self.end_of_standard_support {
+            Lifecycle::StandardSupport
+        } else if date > self.end_of_life {
+            Lifecycle::EndOfLife
+        } else if self.legacy_start.is_some_and(|start| date >= start) {
+            Lifecycle::LegacySupport
+        } else if self.esm_start.is_some_and(|start| date >= start) {
+            Lifecycle::ExpandedSecurityMaintenance
+        } else {
+            Lifecycle::EndOfLife
+        }
+    }
+
+    /// Returns `true` if the series is supported on `date`, including standard
+    /// support, ESM, and legacy support.
+    pub fn is_active_on(&self, date: Date) -> bool {
+        self.release_date <= date && date <= self.end_of_life
+    }
+
+    /// Returns `true` if the series is receiving ESM on `date`.
+    pub fn is_esm_on(&self, date: Date) -> bool {
+        self.lifecycle_on(date) == Lifecycle::ExpandedSecurityMaintenance
+    }
+
+    /// Returns `true` if the series is receiving legacy support on `date`.
+    pub fn is_legacy_on(&self, date: Date) -> bool {
+        self.lifecycle_on(date) == Lifecycle::LegacySupport
+    }
+
+    /// Returns `true` if the series has reached end of life on `date`.
+    pub fn is_end_of_life_on(&self, date: Date) -> bool {
+        self.lifecycle_on(date) == Lifecycle::EndOfLife
+    }
+}
+
+impl fmt::Display for SeriesInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code_name_short)
+    }
+}
+
+fn is_numeric(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    if value.len() >= prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&value[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn strip_suffix_ignore_ascii_case<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
+    if value.len() >= suffix.len()
+        && value[value.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+    {
+        Some(&value[..value.len() - suffix.len()])
+    } else {
+        None
+    }
+}
+
+/// Every known Ubuntu series, ordered by release date.
+///
+/// The data is current as of [`REFERENCE_DATE`]. It is generated from the
+/// `distro-info-data` package's `ubuntu.csv` by the `codegen` tool; do not edit
+/// it by hand.
+///
+/// ESM begins when standard support ends, and legacy support begins in the month
+/// that ESM ends.
+pub static SERIES: &[SeriesInfo] = &[
+@@SERIES_ENTRIES@@];
+
+/// Index of the series currently in development.
+///
+/// Kept as a constant so that [`SeriesInfo::devel`] is O(1). The
+/// `devel_index_is_correct` test verifies that it points at the earliest future
+/// release.
+const DEVEL_INDEX: usize = @@DEVEL_INDEX@@;
+
+/// Version to index in [`SERIES`].
+///
+/// A compile-time perfect hash map keeps lookups O(1) in the number of series.
+static VERSION_INDEX: phf::Map<&'static str, usize> = phf_map! {
+@@VERSION_INDEX@@};
+
+/// Lowercase short code name to index in [`SERIES`].
+static SHORT_NAME_INDEX: phf::Map<&'static str, usize> = phf_map! {
+@@SHORT_NAME_INDEX@@};
+
+/// Lowercase full code name to index in [`SERIES`].
+static FULL_NAME_INDEX: phf::Map<&'static str, usize> = phf_map! {
+@@FULL_NAME_INDEX@@};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn series_identifiers_are_unique() {
+        let mut versions = std::collections::HashSet::new();
+        let mut short_names = std::collections::HashSet::new();
+        let mut full_names = std::collections::HashSet::new();
+
+        for series in SERIES {
+            assert!(
+                versions.insert(series.version),
+                "duplicate version {}",
+                series.version
+            );
+            assert!(
+                short_names.insert(series.code_name_short),
+                "duplicate short name {}",
+                series.code_name_short
+            );
+            assert!(
+                full_names.insert(series.code_name),
+                "duplicate full name {}",
+                series.code_name
+            );
+        }
+    }
+
+    #[test]
+    fn lookup_maps_match_series_data() {
+        assert_eq!(VERSION_INDEX.len(), SERIES.len());
+        assert_eq!(SHORT_NAME_INDEX.len(), SERIES.len());
+        assert_eq!(FULL_NAME_INDEX.len(), SERIES.len());
+
+        for (index, series) in SERIES.iter().enumerate() {
+            assert_eq!(VERSION_INDEX.get(series.version), Some(&index));
+            assert_eq!(SHORT_NAME_INDEX.get(series.code_name_short), Some(&index));
+
+            let full_name = series.code_name.to_ascii_lowercase();
+            assert_eq!(FULL_NAME_INDEX.get(full_name.as_str()), Some(&index));
+        }
+    }
+
+    #[test]
+    fn devel_index_is_correct() {
+        let expected = SERIES
+            .iter()
+            .enumerate()
+            .filter(|(_, series)| series.release_date > REFERENCE_DATE)
+            .min_by_key(|(_, series)| series.release_date)
+            .map(|(index, _)| index)
+            .expect("series data must contain a future release");
+
+        assert_eq!(DEVEL_INDEX, expected);
+    }
+
+    #[test]
+    fn series_are_ordered_by_release_date() {
+        for pair in SERIES.windows(2) {
+            assert!(
+                pair[0].release_date < pair[1].release_date,
+                "{} is not before {}",
+                pair[0].code_name_short,
+                pair[1].code_name_short
+            );
+            assert!(
+                pair[0] < pair[1],
+                "{} does not sort before {}",
+                pair[0].code_name_short,
+                pair[1].code_name_short
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_phases_are_ordered() {
+        assert!(Lifecycle::Development < Lifecycle::StandardSupport);
+        assert!(Lifecycle::StandardSupport < Lifecycle::ExpandedSecurityMaintenance);
+        assert!(Lifecycle::ExpandedSecurityMaintenance < Lifecycle::LegacySupport);
+        assert!(Lifecycle::LegacySupport < Lifecycle::EndOfLife);
+    }
+
+    #[test]
+    fn lifecycle_dates_are_consistent() {
+        for series in SERIES {
+            assert!(
+                series.release_date <= series.end_of_standard_support,
+                "{}: release after end of standard support",
+                series.code_name_short
+            );
+            assert!(
+                series.end_of_standard_support <= series.end_of_life,
+                "{}: end of standard support after end of life",
+                series.code_name_short
+            );
+            if let Some(esm_start) = series.esm_start {
+                assert!(
+                    esm_start <= series.end_of_life,
+                    "{}: ESM starts after end of life",
+                    series.code_name_short
+                );
+            }
+            if let Some(legacy_start) = series.legacy_start {
+                assert!(
+                    legacy_start <= series.end_of_life,
+                    "{}: legacy support starts after end of life",
+                    series.code_name_short
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn version_lookup_accepts_common_forms() {
+        let cases = [
+            ("26.04", "resolute"),
+            ("26.04 LTS", "resolute"),
+            ("26.04.1 LTS", "resolute"),
+            ("Ubuntu 26.04 LTS", "resolute"),
+            ("ubuntu 26.04 lts", "resolute"),
+            ("24.04.1 LTS", "noble"),
+            ("26.10", "stonking"),
+            ("27.04", "tenacious"),
+        ];
+
+        for (input, expected) in cases {
+            let series = SeriesInfo::from_version(input).unwrap();
+            assert_eq!(series.code_name_short, expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn version_lookup_rejects_invalid_forms() {
+        for input in [
+            "",
+            "26",
+            "26.4",
+            "26.04.1.2",
+            "26.04 LTS extra",
+            "26.10 LTS",
+            "26.10.1",
+            "99.99",
+        ] {
+            assert!(SeriesInfo::from_version(input).is_none(), "input: {input}");
+        }
+    }
+
+    #[test]
+    fn code_name_lookup_accepts_full_and_short_forms() {
+        let cases = [
+            ("Stonking Stingray", "stonking"),
+            ("stonking", "stonking"),
+            ("Resolute Raccoon", "resolute"),
+            ("resolute", "resolute"),
+        ];
+
+        for (input, expected) in cases {
+            let series = SeriesInfo::from_code_name(input).unwrap();
+            assert_eq!(series.code_name_short, expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn code_name_lookup_is_case_insensitive() {
+        assert_eq!(
+            SeriesInfo::from_code_name("STONKING STINGRAY")
+                .unwrap()
+                .code_name_short,
+            "stonking"
+        );
+        assert_eq!(
+            SeriesInfo::from_code_name("StOnKiNg")
+                .unwrap()
+                .code_name_short,
+            "stonking"
+        );
+    }
+
+    #[test]
+    fn devel_is_the_future_release() {
+        let devel = SeriesInfo::devel();
+        assert_eq!(devel.code_name_short, "@@DEVEL_SHORT@@");
+        assert_eq!(devel.code_name, "@@DEVEL_CODE_NAME@@");
+        assert_eq!(devel.version, "@@DEVEL_VERSION@@");
+        assert!(devel.release_date > REFERENCE_DATE);
+        assert_eq!(devel.lifecycle_on(REFERENCE_DATE), Lifecycle::Development);
+        assert_eq!(SeriesInfo::from_code_name("devel"), Some(devel));
+    }
+
+    #[test]
+    fn current_lifecycle_groups_are_correct() {
+        let active: Vec<_> = SeriesInfo::active()
+            .map(|series| series.code_name_short)
+            .collect();
+@@ASSERT_ACTIVE@@
+        let esm: Vec<_> = SeriesInfo::esm()
+            .map(|series| series.code_name_short)
+            .collect();
+@@ASSERT_ESM@@
+        let current_esm: Vec<_> = SeriesInfo::current_esm()
+            .map(|series| series.code_name_short)
+            .collect();
+@@ASSERT_CURRENT_ESM@@
+        let legacy: Vec<_> = SeriesInfo::legacy()
+            .map(|series| series.code_name_short)
+            .collect();
+@@ASSERT_LEGACY@@
+        let current_legacy: Vec<_> = SeriesInfo::current_legacy()
+            .map(|series| series.code_name_short)
+            .collect();
+@@ASSERT_CURRENT_LEGACY@@
+        let eol: Vec<_> = SeriesInfo::end_of_life()
+            .map(|series| series.code_name_short)
+            .collect();
+@@ASSERT_EOL@@
+    }
+
+    #[test]
+    fn lifecycle_phases_are_reported() {
+        let series = SeriesInfo::from_version("@@PHASE_VERSION@@").unwrap();
+        assert_eq!(
+            series.lifecycle_on(series.release_date),
+            Lifecycle::StandardSupport
+        );
+        assert_eq!(
+            series.lifecycle_on(series.end_of_standard_support),
+            Lifecycle::StandardSupport
+        );
+        assert_eq!(
+            series.lifecycle_on(Date::new(@@PHASE_ESM@@)),
+            Lifecycle::ExpandedSecurityMaintenance
+        );
+        assert_eq!(
+            series.lifecycle_on(series.legacy_start.unwrap()),
+            Lifecycle::LegacySupport
+        );
+        assert_eq!(
+            series.lifecycle_on(series.end_of_life),
+            Lifecycle::LegacySupport
+        );
+        assert_eq!(
+            series.lifecycle_on(Date::new(@@PHASE_EOL@@)),
+            Lifecycle::EndOfLife
+        );
+    }
+}

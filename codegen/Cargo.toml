@@ -1,0 +1,9 @@
+[package]
+name = "codegen"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "Generates ubuntu-info-rust's series data from distro-info-data"
+publish = false
+
+[dependencies]
