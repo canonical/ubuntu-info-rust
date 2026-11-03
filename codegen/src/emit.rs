@@ -6,8 +6,8 @@
 
 use std::fmt::Write as _;
 
-use crate::date::Date;
 use crate::model::{Dataset, Series};
+use time::Date;
 
 const TEMPLATE: &str = include_str!("series.rs.template");
 
@@ -25,7 +25,7 @@ pub fn render(dataset: &Dataset) -> String {
 
     let rendered = TEMPLATE
         .to_owned()
-        .replace_once("@@REFERENCE_DATE@@", &dataset.reference_date.rust_args())
+        .replace_once("@@REFERENCE_DATE@@", &rust_args(dataset.reference_date))
         .replace_once("@@SERIES_ENTRIES@@", &series_entries(&dataset.series))
         .replace_once("@@DEVEL_INDEX@@", &dataset.devel_index.to_string())
         .replace_once(
@@ -70,9 +70,9 @@ pub fn render(dataset: &Dataset) -> String {
         .replace_once("@@PHASE_VERSION@@", &phase.version)
         .replace_once(
             "@@PHASE_ESM@@",
-            &phase.end_of_standard_support.next_day().rust_args(),
+            &rust_args(next_day(phase.end_of_standard_support)),
         )
-        .replace_once("@@PHASE_EOL@@", &phase.end_of_life.next_day().rust_args());
+        .replace_once("@@PHASE_EOL@@", &rust_args(next_day(phase.end_of_life)));
 
     assert!(
         !rendered.contains("@@"),
@@ -127,17 +127,17 @@ fn series_entries(series: &[Series]) -> String {
         let _ = writeln!(
             out,
             "        release_date: {},",
-            entry.release_date.rust_expr()
+            rust_expr(entry.release_date)
         );
         let _ = writeln!(
             out,
             "        end_of_standard_support: {},",
-            entry.end_of_standard_support.rust_expr()
+            rust_expr(entry.end_of_standard_support)
         );
         let _ = writeln!(
             out,
             "        end_of_life: {},",
-            entry.end_of_life.rust_expr()
+            rust_expr(entry.end_of_life)
         );
         let _ = writeln!(out, "        esm_start: {},", optional(&entry.esm_start));
         let _ = writeln!(
@@ -151,9 +151,22 @@ fn series_entries(series: &[Series]) -> String {
     out
 }
 
+fn rust_args(date: Date) -> String {
+    format!("{}, {}, {}", date.year(), date.month() as u8, date.day())
+}
+
+fn rust_expr(date: Date) -> String {
+    format!("Date::new({})", rust_args(date))
+}
+
+fn next_day(date: Date) -> Date {
+    date.next_day()
+        .expect("series dates are within the supported date range")
+}
+
 fn optional(date: &Option<Date>) -> String {
     match date {
-        Some(date) => format!("Some({})", date.rust_expr()),
+        Some(date) => format!("Some({})", rust_expr(*date)),
         None => "None".to_owned(),
     }
 }

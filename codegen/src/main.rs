@@ -8,8 +8,6 @@
 //! cargo run --package codegen -- ubuntu.csv src/series.rs
 //! ```
 
-mod csv;
-mod date;
 mod emit;
 mod model;
 

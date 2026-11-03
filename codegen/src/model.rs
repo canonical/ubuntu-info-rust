@@ -24,8 +24,8 @@
 //! - `REFERENCE_DATE` is the newest `created` date in the file: the date the
 //!   most recent series was added upstream.
 
-use crate::csv;
-use crate::date::Date;
+use serde::Deserialize;
+use time::{Date, format_description};
 
 /// The columns of `ubuntu.csv`, in order.
 const COLUMNS: [&str; 9] = [
@@ -74,8 +74,25 @@ pub struct Dataset {
     pub devel_index: usize,
 }
 
-/// A raw `ubuntu.csv` row: the derived series plus the `created` date, which is
-/// only used to compute `REFERENCE_DATE`.
+/// One raw `ubuntu.csv` record, deserialized by column name.
+#[derive(Debug, Deserialize)]
+struct CsvRow {
+    version: String,
+    codename: String,
+    series: String,
+    created: String,
+    release: String,
+    eol: String,
+    #[serde(rename = "eol-server", default)]
+    eol_server: Option<String>,
+    #[serde(rename = "eol-esm", default)]
+    eol_esm: Option<String>,
+    #[serde(rename = "eol-legacy", default)]
+    eol_legacy: Option<String>,
+}
+
+/// A derived series plus the `created` date, which is only used to compute
+/// `REFERENCE_DATE`.
 #[derive(Debug, Clone)]
 struct Row {
     created: Date,
@@ -84,9 +101,17 @@ struct Row {
 
 /// Derives the dataset from the contents of `ubuntu.csv`.
 pub fn derive(csv_text: &str) -> Result<Dataset, String> {
-    let records = csv::parse(csv_text)?;
-    let header = records.first().ok_or("ubuntu.csv is empty")?;
-    if header.len() != COLUMNS.len() || header.iter().zip(COLUMNS).any(|(got, want)| got != want) {
+    // Tolerate a UTF-8 byte order mark, which some editors and proxies add.
+    let csv_text = csv_text.strip_prefix('\u{feff}').unwrap_or(csv_text);
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_reader(csv_text.as_bytes());
+    let headers = reader
+        .headers()
+        .map_err(|error| format!("cannot read ubuntu.csv header: {error}"))?
+        .clone();
+    if headers.len() != COLUMNS.len() || headers.iter().zip(COLUMNS).any(|(got, want)| got != want)
+    {
         return Err(format!(
             "unexpected ubuntu.csv header: expected {}",
             COLUMNS.join(",")
@@ -94,8 +119,21 @@ pub fn derive(csv_text: &str) -> Result<Dataset, String> {
     }
 
     let mut rows = Vec::new();
-    for record in &records[1..] {
-        rows.push(derive_row(record)?);
+    for (index, result) in reader.records().enumerate() {
+        let record =
+            result.map_err(|error| format!("invalid CSV record {}: {error}", index + 2))?;
+        if record.len() > COLUMNS.len() {
+            return Err(format!(
+                "CSV record {} has {} fields; expected at most {}",
+                index + 2,
+                record.len(),
+                COLUMNS.len()
+            ));
+        }
+        let row = record
+            .deserialize(Some(&headers))
+            .map_err(|error| format!("invalid CSV record {}: {error}", index + 2))?;
+        rows.push(derive_row(row)?);
     }
 
     rows.sort_by_key(|a| a.series.release_date);
@@ -134,17 +172,16 @@ pub fn derive(csv_text: &str) -> Result<Dataset, String> {
     })
 }
 
-fn derive_row(record: &[String]) -> Result<Row, String> {
-    let field = |index: usize| record.get(index).map(String::as_str).unwrap_or("");
-    let version_raw = field(0);
-    let code_name = field(1);
-    let code_name_short = field(2);
-    let created = field(3);
-    let release = field(4);
-    let eol = field(5);
-    let eol_server = field(6);
-    let eol_esm = field(7);
-    let eol_legacy = field(8);
+fn derive_row(record: CsvRow) -> Result<Row, String> {
+    let version_raw = record.version.as_str();
+    let code_name = record.codename.as_str();
+    let code_name_short = record.series.as_str();
+    let created = record.created.as_str();
+    let release = record.release.as_str();
+    let eol = record.eol.as_str();
+    let eol_server = record.eol_server.as_deref().unwrap_or("");
+    let eol_esm = record.eol_esm.as_deref().unwrap_or("");
+    let eol_legacy = record.eol_legacy.as_deref().unwrap_or("");
 
     let context = format!(
         "series {} ({})",
@@ -175,11 +212,11 @@ fn derive_row(record: &[String]) -> Result<Row, String> {
         ));
     }
 
-    let created = Date::parse(require(created, "created", &context)?)
+    let created = parse_date(require(created, "created", &context)?)
         .map_err(|error| format!("{context}: {error}"))?;
-    let release_date = Date::parse(require(release, "release", &context)?)
+    let release_date = parse_date(require(release, "release", &context)?)
         .map_err(|error| format!("{context}: {error}"))?;
-    let eol = Date::parse(require(eol, "eol", &context)?)
+    let eol = parse_date(require(eol, "eol", &context)?)
         .map_err(|error| format!("{context}: {error}"))?;
     let eol_server = optional_date(eol_server, &context, "eol-server")?;
     let eol_esm = optional_date(eol_esm, &context, "eol-esm")?;
@@ -195,9 +232,9 @@ fn derive_row(record: &[String]) -> Result<Row, String> {
     let end_of_life = eol_legacy.or(eol_esm).or(eol_server).unwrap_or(eol);
     let esm_start = eol_esm.map(|_| end_of_standard_support);
     let legacy_start = eol_legacy.is_some().then(|| {
-        eol_esm
-            .expect("eol-legacy requires eol-esm")
-            .first_of_month()
+        let esm_end = eol_esm.expect("eol-legacy requires eol-esm");
+        Date::from_calendar_date(esm_end.year(), esm_end.month(), 1)
+            .expect("the first day of a month is valid")
     });
 
     if release_date > end_of_standard_support {
@@ -249,11 +286,17 @@ fn require<'a>(value: &'a str, column: &str, context: &str) -> Result<&'a str, S
     }
 }
 
+fn parse_date(value: &str) -> Result<Date, String> {
+    let format = format_description::parse_borrowed::<3>("[year]-[month]-[day]")
+        .map_err(|error| format!("invalid date format description: {error}"))?;
+    Date::parse(value, &format).map_err(|_| format!("invalid date: {value}"))
+}
+
 fn optional_date(value: &str, context: &str, column: &str) -> Result<Option<Date>, String> {
     if value.is_empty() {
         return Ok(None);
     }
-    Date::parse(value)
+    parse_date(value)
         .map(Some)
         .map_err(|error| format!("{context}: {column}: {error}"))
 }
@@ -356,6 +399,23 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
         assert_eq!(dapper.end_of_life.to_string(), "2011-06-01");
         assert_eq!(dapper.esm_start, None);
         assert_eq!(dapper.legacy_start, None);
+    }
+
+    #[test]
+    fn deserializes_quoted_fields_and_accepts_omitted_trailing_columns() {
+        let csv = "version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy\n\
+4.10,\"Warty, Warthog\",warty,2004-03-05,2004-10-20,2006-04-30\n\
+27.04,Tenacious T-Rex,tenacious,2026-10-16,2027-04-22,2028-01-20\n";
+        let dataset = derive(csv).unwrap();
+        assert_eq!(dataset.series[0].code_name, "Warty, Warthog");
+    }
+
+    #[test]
+    fn rejects_a_row_with_extra_fields() {
+        let csv = "version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy\n\
+4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30,,,,extra\n";
+        let error = derive(csv).unwrap_err();
+        assert!(error.contains("expected at most 9"), "error: {error}");
     }
 
     #[test]
