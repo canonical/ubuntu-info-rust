@@ -128,8 +128,77 @@ fn archives_round_trip_through_serde() {
         Archive::Security,
         Archive::Ports,
         Archive::country("fi"),
+        Archive::country("FI"),
+        Archive::country("fI"),
     ] {
         let json = serde_json::to_string(&archive).unwrap();
         assert_eq!(serde_json::from_str::<Archive>(&json).unwrap(), archive);
     }
+}
+
+#[test]
+fn country_deserialization_rejects_invalid_codes() {
+    for code in ["", "f", "fin", "1a", "a-", "é", "f/", " fi", "fi "] {
+        let json = serde_json::json!({"country": code}).to_string();
+        let error = serde_json::from_str::<Archive>(&json).unwrap_err();
+        assert!(
+            error.to_string().contains("exactly two ASCII letters"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn country_deserialization_reuses_static_storage_and_preserves_case() {
+    let mut recognized = 0;
+    for first in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" {
+        for second in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" {
+            let code = String::from_utf8(vec![*first, *second]).unwrap();
+            let json = serde_json::json!({"country": code}).to_string();
+            let first_archive = serde_json::from_str::<Archive>(&json);
+            let Ok(Archive::Country(first_code)) = first_archive else {
+                assert!(
+                    first_archive
+                        .unwrap_err()
+                        .to_string()
+                        .contains("unrecognized ISO")
+                );
+                continue;
+            };
+            recognized += 1;
+            let Archive::Country(second_code) = serde_json::from_str::<Archive>(&json).unwrap()
+            else {
+                panic!("expected country archive");
+            };
+            assert_eq!(first_code, code);
+            assert!(std::ptr::eq(first_code, second_code));
+        }
+    }
+    // iso3166-static 0.4.3 includes 249 assigned and 42 user-assigned codes.
+    assert_eq!(recognized, 291 * 4);
+}
+
+#[test]
+fn country_deserialization_rejects_unrecognized_iso_codes() {
+    for code in ["jj", "JJ", "Jj", "jJ"] {
+        let json = serde_json::json!({"country": code}).to_string();
+        let error = serde_json::from_str::<Archive>(&json).unwrap_err();
+        assert!(error.to_string().contains("unrecognized ISO 3166-1"));
+    }
+    for code in ["aa", "ZZ", "xK"] {
+        let json = serde_json::json!({"country": code}).to_string();
+        let Archive::Country(parsed) = serde_json::from_str::<Archive>(&json).unwrap() else {
+            panic!("expected country archive");
+        };
+        assert_eq!(parsed, code);
+    }
+}
+
+#[test]
+fn archive_remains_copy_and_const_constructible() {
+    const ARCHIVE: Archive = Archive::country("FI");
+    let copied = ARCHIVE;
+    assert!(matches!(ARCHIVE, Archive::Country("FI")));
+    assert_eq!(copied, ARCHIVE);
+    assert_eq!(copied.base_url(), "http://FI.archive.ubuntu.com/ubuntu");
 }

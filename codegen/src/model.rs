@@ -200,6 +200,17 @@ fn derive_row(record: CsvRow) -> Result<Row, String> {
     if version.is_empty() {
         return Err(format!("{context}: missing version column"));
     }
+    if !version.split_once('.').is_some_and(|(major, minor)| {
+        !major.is_empty()
+            && !minor.is_empty()
+            && major.bytes().all(|byte| byte.is_ascii_digit())
+            && minor.bytes().all(|byte| byte.is_ascii_digit())
+    }) {
+        return Err(format!(
+            "{context}: invalid version {version_raw:?}; expected numeric major.minor \
+             with an optional exact ' LTS' suffix"
+        ));
+    }
     require(code_name, "codename", &context)?;
     require(code_name_short, "series", &context)?;
     if !code_name_short
@@ -222,13 +233,45 @@ fn derive_row(record: CsvRow) -> Result<Row, String> {
     let eol_esm = optional_date(eol_esm, &context, "eol-esm")?;
     let eol_legacy = optional_date(eol_legacy, &context, "eol-legacy")?;
 
+    if created > release_date {
+        return Err(format!(
+            "{context}: created date {created} is after release date {release_date}"
+        ));
+    }
+    if release_date > eol {
+        return Err(format!(
+            "{context}: release date {release_date} is after eol date {eol}"
+        ));
+    }
+    if let Some(eol_server) = eol_server
+        && eol > eol_server
+    {
+        return Err(format!(
+            "{context}: eol date {eol} is after eol-server date {eol_server}"
+        ));
+    }
+    let end_of_standard_support = eol_server.unwrap_or(eol);
+    if let Some(eol_esm) = eol_esm
+        && eol_esm < end_of_standard_support
+    {
+        return Err(format!(
+            "{context}: eol-esm date {eol_esm} is before the end of standard support \
+             {end_of_standard_support}"
+        ));
+    }
+    if let (Some(eol_esm), Some(eol_legacy)) = (eol_esm, eol_legacy)
+        && eol_esm > eol_legacy
+    {
+        return Err(format!(
+            "{context}: eol-esm date {eol_esm} is after eol-legacy date {eol_legacy}"
+        ));
+    }
     if eol_legacy.is_some() && eol_esm.is_none() {
         return Err(format!(
             "{context}: eol-legacy is set without eol-esm; legacy support follows ESM"
         ));
     }
 
-    let end_of_standard_support = eol_server.unwrap_or(eol);
     let end_of_life = eol_legacy.or(eol_esm).or(eol_server).unwrap_or(eol);
     let esm_start = eol_esm.map(|_| end_of_standard_support);
     let legacy_start = eol_legacy.is_some().then(|| {
@@ -308,14 +351,21 @@ fn validate_identifiers(rows: &[Row]) -> Result<(), String> {
 
     for row in rows {
         let series = &row.series;
+        let context = format!("series {} ({})", series.version, series.code_name_short);
         if !versions.insert(series.version.as_str()) {
-            return Err(format!("duplicate version {}", series.version));
+            return Err(format!("{context}: duplicate version {}", series.version));
         }
         if !short_names.insert(series.code_name_short.as_str()) {
-            return Err(format!("duplicate series name {}", series.code_name_short));
+            return Err(format!(
+                "{context}: duplicate series name {}",
+                series.code_name_short
+            ));
         }
-        if !full_names.insert(series.code_name.as_str()) {
-            return Err(format!("duplicate code name {}", series.code_name));
+        if !full_names.insert(series.code_name.to_ascii_lowercase()) {
+            return Err(format!(
+                "{context}: duplicate code name {} (ASCII case-insensitive)",
+                series.code_name
+            ));
         }
     }
 
@@ -332,6 +382,201 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 22.04 LTS,Jammy Jellyfish,jammy,2021-10-14,2022-04-21,2027-06-01,2027-06-01,2032-04-21,2037-04-30
 27.04,Tenacious T-Rex,tenacious,2026-10-16,2027-04-22,2028-01-20
 ";
+
+    fn csv_with_row(row: &str) -> String {
+        format!(
+            "{}\n{row}\n\
+             27.04,Tenacious T-Rex,tenacious,2026-10-16,2027-04-22,2028-01-20\n",
+            COLUMNS.join(",")
+        )
+    }
+
+    #[test]
+    fn rejects_invalid_versions() {
+        for version in [
+            "22",
+            ".",
+            ".04",
+            "22.",
+            "22.04.1",
+            "22.04.1 LTS",
+            "Ubuntu 22.04",
+            "Ubuntu 22.04 LTS",
+            "a.04",
+            "22.b",
+            "２２.04",
+            "22.٠٤",
+            " 22.04",
+            "22.04 ",
+            "22.04 lts",
+            "22.04LTS",
+            "22.04  LTS",
+            "22.04 LTS LTS",
+            "22.04 LTS ",
+        ] {
+            let csv = csv_with_row(&format!(
+                "{version},Jammy Jellyfish,jammy,2021-10-14,2022-04-21,2027-06-01"
+            ));
+            let error = derive(&csv).unwrap_err();
+            assert_eq!(
+                error,
+                format!(
+                    "series {version} (jammy): invalid version {version:?}; \
+                     expected numeric major.minor with an optional exact ' LTS' suffix"
+                ),
+                "version: {version:?}"
+            );
+        }
+        for version in ["", " LTS"] {
+            let csv = csv_with_row(&format!(
+                "{version},Jammy Jellyfish,jammy,2021-10-14,2022-04-21,2027-06-01"
+            ));
+            let error = derive(&csv).unwrap_err();
+            let label = if version.is_empty() {
+                "Jammy Jellyfish"
+            } else {
+                version
+            };
+            assert_eq!(
+                error,
+                format!("series {label} (jammy): missing version column")
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_numeric_major_minor_versions() {
+        for (raw, version, is_lts) in [
+            ("4.10", "4.10", false),
+            ("22.04 LTS", "22.04", true),
+            ("0.0", "0.0", false),
+            ("123.456 LTS", "123.456", true),
+        ] {
+            let csv = csv_with_row(&format!(
+                "{raw},Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30"
+            ));
+            let dataset = derive(&csv).unwrap();
+            assert_eq!(dataset.series[0].version, version, "version: {raw}");
+            assert_eq!(dataset.series[0].is_lts, is_lts, "version: {raw}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_raw_chronology() {
+        for (dates, message) in [
+            (
+                "2022-04-22,2022-04-21,2027-06-01",
+                "created date 2022-04-22 is after release date 2022-04-21",
+            ),
+            (
+                "2021-10-14,2022-04-21,2022-04-20,2027-06-01,2032-04-21,2037-04-30",
+                "release date 2022-04-21 is after eol date 2022-04-20",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,2027-05-31,2032-04-21,2037-04-30",
+                "eol date 2027-06-01 is after eol-server date 2027-05-31",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,,2027-05-31,2037-04-30",
+                "eol-esm date 2027-05-31 is before the end of standard support 2027-06-01",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,2028-06-01,2028-05-31,2037-04-30",
+                "eol-esm date 2028-05-31 is before the end of standard support 2028-06-01",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,2027-06-01,2032-04-21,2032-04-20",
+                "eol-esm date 2032-04-21 is after eol-legacy date 2032-04-20",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,2027-06-01,2032-04-21,2031-04-30",
+                "eol-esm date 2032-04-21 is after eol-legacy date 2031-04-30",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,2027-06-01,,2037-04-30",
+                "eol-legacy is set without eol-esm; legacy support follows ESM",
+            ),
+        ] {
+            let csv = csv_with_row(&format!("22.04 LTS,Jammy Jellyfish,jammy,{dates}"));
+            let error = derive(&csv).unwrap_err();
+            assert_eq!(
+                error,
+                format!("series 22.04 LTS (jammy): {message}"),
+                "dates: {dates}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_equal_raw_dates_and_optional_trailing_columns() {
+        for (ends, standard, end_of_life, esm_start, legacy_start) in [
+            ("2022-04-21", "2022-04-21", "2022-04-21", None, None),
+            (
+                "2027-06-01,2027-06-01",
+                "2027-06-01",
+                "2027-06-01",
+                None,
+                None,
+            ),
+            (
+                "2027-06-01,,2027-06-01",
+                "2027-06-01",
+                "2027-06-01",
+                Some("2027-06-01"),
+                None,
+            ),
+            (
+                "2027-06-01,2027-06-01,2027-06-01",
+                "2027-06-01",
+                "2027-06-01",
+                Some("2027-06-01"),
+                None,
+            ),
+            (
+                "2027-06-01,2027-06-01,2032-04-21,2032-04-21",
+                "2027-06-01",
+                "2032-04-21",
+                Some("2027-06-01"),
+                Some("2032-04-01"),
+            ),
+        ] {
+            let csv = csv_with_row(&format!(
+                "22.04 LTS,Jammy Jellyfish,jammy,2022-04-21,2022-04-21,{ends}"
+            ));
+            let dataset = derive(&csv).unwrap();
+            let series = &dataset.series[0];
+            assert_eq!(series.end_of_standard_support.to_string(), standard);
+            assert_eq!(series.end_of_life.to_string(), end_of_life);
+            assert_eq!(
+                series.esm_start.map(|date| date.to_string()),
+                esm_start.map(str::to_owned)
+            );
+            assert_eq!(
+                series.legacy_start.map(|date| date.to_string()),
+                legacy_start.map(str::to_owned)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_case_insensitive_duplicate_full_names() {
+        for name in [
+            "Warty Warthog",
+            "warty warthog",
+            "WARTY WARTHOG",
+            "wArTy WaRtHoG",
+        ] {
+            let csv = csv_with_row(&format!(
+                "4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30\n\
+                 5.04,{name},hoary,2004-10-20,2005-04-08,2006-10-31"
+            ));
+            let error = derive(&csv).unwrap_err();
+            assert_eq!(
+                error,
+                format!("series 5.04 (hoary): duplicate code name {name} (ASCII case-insensitive)")
+            );
+        }
+    }
 
     #[test]
     fn derives_a_non_lts_series() {
@@ -500,8 +745,12 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
     fn rejects_a_dataset_without_a_future_release() {
         let csv = "\
 version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
-4.10,Warty Warthog,warty,2006-05-05,2004-10-20,2006-04-30
+4.10,Warty Warthog,warty,2004-10-20,2004-10-20,2006-04-30
 ";
-        assert!(derive(csv).is_err());
+        let error = derive(csv).unwrap_err();
+        assert!(
+            error.contains("cannot determine the development series"),
+            "error: {error}"
+        );
     }
 }

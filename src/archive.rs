@@ -31,8 +31,8 @@ pub enum Archive {
 /// The owned representation used to deserialize [`Archive`].
 ///
 /// [`Archive::Country`] stores a `&'static str`, which serde cannot deserialize
-/// directly. Deserializing a country mirror allocates the country code and
-/// leaks it so it can be stored with a `'static` lifetime.
+/// directly. Deserializing a country mirror resolves its two-letter ASCII code
+/// against a compile-time table, preserving its case without leaking memory.
 #[cfg(feature = "serde")]
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -44,16 +44,35 @@ enum ArchiveOwned {
 }
 
 #[cfg(feature = "serde")]
-impl From<ArchiveOwned> for Archive {
-    fn from(owned: ArchiveOwned) -> Self {
+impl TryFrom<ArchiveOwned> for Archive {
+    type Error = &'static str;
+
+    fn try_from(owned: ArchiveOwned) -> Result<Self, Self::Error> {
         match owned {
-            ArchiveOwned::Primary => Self::Primary,
-            ArchiveOwned::Security => Self::Security,
-            ArchiveOwned::Ports => Self::Ports,
-            ArchiveOwned::Country(code) => Self::Country(Box::leak(code.into_boxed_str())),
+            ArchiveOwned::Primary => Ok(Self::Primary),
+            ArchiveOwned::Security => Ok(Self::Security),
+            ArchiveOwned::Ports => Ok(Self::Ports),
+            ArchiveOwned::Country(code) => {
+                let bytes = code.as_bytes();
+                if bytes.len() != 2 || !bytes.iter().all(u8::is_ascii_alphabetic) {
+                    return Err("country mirror code must contain exactly two ASCII letters");
+                }
+                let uppercase = [bytes[0].to_ascii_uppercase(), bytes[1].to_ascii_uppercase()];
+                let index = COUNTRY_CODES
+                    .binary_search_by(|row| row[0].as_bytes().cmp(&uppercase))
+                    .map_err(|_| "unrecognized ISO 3166-1 alpha-2 country code")?;
+                let case = usize::from(bytes[0].is_ascii_lowercase()) * 2
+                    + usize::from(bytes[1].is_ascii_lowercase());
+                Ok(Self::Country(COUNTRY_CODES[index][case]))
+            }
         }
     }
 }
+
+// Generated using iso3166-static only in the codegen package. Library clients
+// compile this checked-in data without depending on that crate.
+#[cfg(feature = "serde")]
+include!("country_codes.rs");
 
 #[cfg(feature = "serde")]
 impl<'de> Deserialize<'de> for Archive {
@@ -62,7 +81,7 @@ impl<'de> Deserialize<'de> for Archive {
         D: serde::Deserializer<'de>,
     {
         let owned = ArchiveOwned::deserialize(deserializer)?;
-        Ok(Archive::from(owned))
+        Archive::try_from(owned).map_err(serde::de::Error::custom)
     }
 }
 
@@ -75,6 +94,11 @@ impl Archive {
     pub const PORTS_URL: &'static str = "http://ports.ubuntu.com/ubuntu-ports";
 
     /// Creates a country mirror archive from a country code.
+    ///
+    /// This constructor preserves its input without validation. When using serde,
+    /// country codes must be recognized ISO 3166-1 alpha-2 values (including
+    /// user-assigned codes); their case is preserved. This does not check whether
+    /// a mirror is currently available.
     pub const fn country(code: &'static str) -> Self {
         Self::Country(code)
     }

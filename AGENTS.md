@@ -19,6 +19,9 @@ Authoritative references for the domain:
 - <https://ubuntu.com/project/docs/release-team/list-of-releases/>
 - <https://ubuntu.com/project/docs/how-ubuntu-is-made/concepts/supported-architectures/>
 
+## Coding Standards
+- Follow idiomatic Rust practices and community standards as defined in `rust-instructions.md`.
+
 ## Quick reference
 
 | Module | Responsibility |
@@ -334,8 +337,14 @@ All public types implement serde's `Serialize` and `Deserialize` traits when
 the optional `serde` feature is enabled. Enums serialize as their canonical
 identifiers, and `Date` serializes as `YYYY-MM-DD`. `SeriesInfo` and `Suite`
 deserialize by resolving against the built-in series data, so the input must
-describe a known series exactly. `Archive::Country` deserialization allocates
-and leaks the country code so it can be stored with a `'static` lifetime.
+describe a known series exactly. `Archive::Country` deserialization resolves ISO
+3166-1 alpha-2 values (including user-assigned codes) from `src/country_codes.rs`,
+a static include generated using the codegen-only `iso3166-static` dependency.
+It preserves case without leaking memory and rejects unrecognized codes.
+`Archive::country()` remains an unvalidated `const` constructor for backward
+compatibility. Regenerate the include with
+`cargo run --locked -p codegen --bin country_codes -- src/country_codes.rs`.
+Do not add `iso3166-static` to the library's dependencies.
 
 ## Data maintenance
 

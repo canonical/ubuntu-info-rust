@@ -372,8 +372,22 @@ assert_eq!(serde_json::from_str::<Suite>(&json).unwrap(), suite);
 
 `SeriesInfo` and `Suite` contain `&'static` references. Deserializing them
 resolves the series against the built-in data, so the input must describe a
-known series exactly. Deserializing `Archive::Country` allocates and leaks the
-country code so it can be stored with a `'static` lifetime.
+known series exactly. Deserializing `Archive::Country` resolves recognized ISO
+3166-1 alpha-2 values (including user-assigned codes) from a checked-in static
+include generated using `iso3166-static` 0.4.3. Case and the existing serialized
+format are preserved without leaking memory. Unrecognized codes are rejected;
+this does not verify the existence of a live mirror. `Archive::country()` remains
+an unchanged, unvalidated `const` constructor.
+
+`iso3166-static` is a dependency of the generator only, not of this library or
+its clients. To regenerate `src/country_codes.rs` after updating that dependency:
+
+```sh
+cargo run --locked -p codegen --bin country_codes -- src/country_codes.rs
+```
+
+The generator's tests verify that the checked-in include matches the pinned
+crate data.
 
 ## API overview
 
@@ -493,7 +507,20 @@ opens a pull request only when the upstream data has changed.
 
 The generator refuses to drop series that are present in the existing file, so a
 truncated or stale `ubuntu.csv` cannot silently delete data. Pass
-`--allow-removals` if a removal is intentional.
+`--allow-removals` if a removal is intentional. This flag does not bypass read
+errors or malformed existing output. The generator validates the baseline's Rust
+syntax and series entries before replacing it; only a missing output file is
+accepted without a baseline.
+
+Versions must be numeric `major.minor` identifiers (with an optional exact ` LTS`
+suffix), and full code names must be unique under ASCII case folding. Raw release
+and support-end dates are checked for chronological consistency before deriving
+lifecycle phases. Rejected updates exit with a contextual error on stderr and
+leave the existing output unchanged.
+
+The generator uses `clap` for arguments, `csv` with `serde` for CSV records,
+`time::Date` for calendar operations, and `syn` to validate existing generated
+Rust source. Its subprocess tests use `tempfile` for isolated output files.
 
 The generator derives each `SeriesInfo` from a `ubuntu.csv` row:
 

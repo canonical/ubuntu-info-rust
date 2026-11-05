@@ -354,18 +354,19 @@ fn is_numeric(value: &str) -> bool {
 }
 
 fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    if value.len() >= prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        Some(&value[prefix.len()..])
+    let (candidate, remainder) = value.get(..prefix.len()).zip(value.get(prefix.len()..))?;
+    if candidate.eq_ignore_ascii_case(prefix) {
+        Some(remainder)
     } else {
         None
     }
 }
 
 fn strip_suffix_ignore_ascii_case<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
-    if value.len() >= suffix.len()
-        && value[value.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-    {
-        Some(&value[..value.len() - suffix.len()])
+    let suffix_start = value.len().checked_sub(suffix.len())?;
+    let (remainder, candidate) = value.get(..suffix_start).zip(value.get(suffix_start..))?;
+    if candidate.eq_ignore_ascii_case(suffix) {
+        Some(remainder)
     } else {
         None
     }
@@ -1069,7 +1070,7 @@ mod tests {
                 series.code_name_short
             );
             assert!(
-                full_names.insert(series.code_name),
+                full_names.insert(series.code_name.to_ascii_lowercase()),
                 "duplicate full name {}",
                 series.code_name
             );
@@ -1088,6 +1089,18 @@ mod tests {
 
             let full_name = series.code_name.to_ascii_lowercase();
             assert_eq!(FULL_NAME_INDEX.get(full_name.as_str()), Some(&index));
+        }
+    }
+
+    #[test]
+    fn every_series_roundtrips_through_version_lookup() {
+        for series in SERIES {
+            assert_eq!(
+                SeriesInfo::from_version(series.version),
+                Some(series),
+                "version {}",
+                series.version
+            );
         }
     }
 
@@ -1190,6 +1203,15 @@ mod tests {
             "26.10 LTS",
             "26.10.1",
             "99.99",
+            "üüüü",
+            "üabc",
+            "ü26.04",
+            "26.04ü",
+            "Ubuntu ü26.04",
+            "Ubuntu 26.04ü",
+            "26.04ü LTS",
+            "26.04 LTSü",
+            "üUbuntu 26.04 LTS",
         ] {
             assert!(SeriesInfo::from_version(input).is_none(), "input: {input}");
         }
