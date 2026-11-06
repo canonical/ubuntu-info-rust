@@ -50,16 +50,16 @@ fi
 
 ### Mandatory Rust project checks
 # ensure code passes unit tests and integration tests
-if ! cargo test 
+if ! cargo test --workspace 
 then
     echo "Some tests are not passing.  Please fix and run 'cargo test' for more information."
     exit 1
 fi
 
 # ensure code passes clippy linter
-if ! cargo clippy --locked --all-targets --all-features -- -D warnings 
+if ! cargo clippy --workspace --locked --all-targets --all-features -- -D warnings 
 then
-    echo "There are some clippy linter issues.  Run 'cargo clippy --locked --all-targets --all-features -- -D warnings' for more information."
+    echo "There are some clippy linter issues.  Run 'cargo clippy --workspace --locked --all-targets --all-features -- -D warnings' for more information."
     exit 1
 fi
 
@@ -71,9 +71,9 @@ then
 fi
 
 # documentation builds without issues
-if ! cargo doc --locked --no-deps --all-features
+if ! cargo doc --workspace --locked --no-deps --all-features
 then
-    echo "There are some documentation build issues.  Run 'cargo doc --locked --no-deps --all-features' for more information."
+    echo "There are some documentation build issues.  Run 'cargo doc --workspace --locked --no-deps --all-features' for more information."
     exit 1
 fi
 

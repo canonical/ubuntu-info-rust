@@ -372,8 +372,22 @@ assert_eq!(serde_json::from_str::<Suite>(&json).unwrap(), suite);
 
 `SeriesInfo` and `Suite` contain `&'static` references. Deserializing them
 resolves the series against the built-in data, so the input must describe a
-known series exactly. Deserializing `Archive::Country` allocates and leaks the
-country code so it can be stored with a `'static` lifetime.
+known series exactly. Deserializing `Archive::Country` resolves recognized ISO
+3166-1 alpha-2 values (including user-assigned codes) from a checked-in static
+include generated using `iso3166-static` 0.4.3. Case and the existing serialized
+format are preserved without leaking memory. Unrecognized codes are rejected;
+this does not verify the existence of a live mirror. `Archive::country()` remains
+an unchanged, unvalidated `const` constructor.
+
+`iso3166-static` is a dependency of the generator only, not of this library or
+its clients. To regenerate `src/country_codes.rs` after updating that dependency:
+
+```sh
+cargo run --locked -p codegen --bin country_codes -- src/country_codes.rs
+```
+
+The generator's tests verify that the checked-in include matches the pinned
+crate data.
 
 ## API overview
 
@@ -456,8 +470,9 @@ flowchart TD
 
 - Dates are inclusive: a series remains in a phase through the last day of that
   phase.
-- `REFERENCE_DATE` is the date on which the series data was last verified. The
-  `active`, `esm`, `legacy`, and `end_of_life` iterators use it.
+- `REFERENCE_DATE` is derived from the upstream data: the date the most recent
+  series was created in `distro-info-data`. The `active`, `esm`, `legacy`, and
+  `end_of_life` iterators use it.
 - `active()` includes series in standard support, ESM, and legacy support. It
   excludes the unreleased development series.
 - `esm()` and `legacy()` include series that have entered those phases, even if
@@ -465,32 +480,69 @@ flowchart TD
   series currently in those phases.
 - `devel()` is the unreleased series with the earliest release date relative to
   `REFERENCE_DATE`. The `devel` code name and suite aliases resolve to it.
-- Where an upstream source only specifies a month, start dates use the first day
-  of the month and end dates use the last day of the month.
+- ESM begins when standard support ends, and legacy support begins in the month
+  that ESM ends.
 - For LTS series before 12.04, the server lifecycle is used.
 
 ## Updating the data
 
-The series data lives in `SERIES` in [`src/series.rs`](src/series.rs). To update
-it:
+The series data in [`src/series.rs`](src/series.rs) is **generated** from the
+`distro-info-data` package's
+[`ubuntu.csv`](https://git.launchpad.net/ubuntu/+source/distro-info-data) by the
+`codegen` tool in [`codegen/`](codegen/). Do not edit it by hand.
 
-1. Update or add `SeriesInfo` entries in release-date order.
-2. Update the `VERSION_INDEX`, `SHORT_NAME_INDEX`, and `FULL_NAME_INDEX` maps in
-   `src/series.rs` so each key points at the correct index in `SERIES`.
-3. Update `DEVEL_INDEX` if the development series changes.
-4. Update `REFERENCE_DATE` when the data has been re-verified.
-5. Use `Date::year_month` for month-precision start dates and
-   `Date::end_of_month` for month-precision end dates.
-6. Run the test suite. The tests enforce unique identifiers, release-date order,
-   consistent lifecycle dates, and that every lookup map matches `SERIES`.
-7. Update this README and the examples if the public API or supported data
-   changes.
+To regenerate it:
+
+```sh
+curl -o ubuntu.csv \
+  "https://git.launchpad.net/ubuntu/+source/distro-info-data/plain/ubuntu.csv"
+cargo run --package codegen -- ubuntu.csv src/series.rs
+cargo fmt
+```
+
+The generator is idempotent: its output is a pure function of `ubuntu.csv`, so
+regenerating an up-to-date file leaves it unchanged. The
+[update workflow](.github/workflows/update-distro-data.yaml) runs weekly and
+opens a pull request only when the upstream data has changed.
+
+The generator refuses to drop series that are present in the existing file, so a
+truncated or stale `ubuntu.csv` cannot silently delete data. Pass
+`--allow-removals` if a removal is intentional. This flag does not bypass read
+errors or malformed existing output. The generator validates the baseline's Rust
+syntax and series entries before replacing it; only a missing output file is
+accepted without a baseline.
+
+Versions must be numeric `major.minor` identifiers (with an optional exact ` LTS`
+suffix), and full code names must be unique under ASCII case folding. Raw release
+and support-end dates are checked for chronological consistency before deriving
+lifecycle phases. Rejected updates exit with a contextual error on stderr and
+leave the existing output unchanged.
+
+The generator uses `clap` for arguments, `csv` with `serde` for CSV records,
+`time::Date` for calendar operations, and `syn` to validate existing generated
+Rust source. Its subprocess tests use `tempfile` for isolated output files.
+
+The generator derives each `SeriesInfo` from a `ubuntu.csv` row:
+
+- `version` is the CSV version with the ` LTS` suffix removed, and `is_lts` is
+  whether the suffix was present.
+- `release_date` is the `release` column.
+- `end_of_standard_support` is `eol-server` when present, otherwise `eol`. For
+  LTS series before 12.04 the server lifecycle is the standard support period.
+- `end_of_life` is the last end date present: `eol-legacy`, then `eol-esm`, then
+  `eol-server`, then `eol`.
+- `esm_start` is the end of standard support, for series that have an `eol-esm`
+  date: ESM begins when standard support ends.
+- `legacy_start` is the first day of the month in which ESM ends, for series
+  that have an `eol-legacy` date.
+- `REFERENCE_DATE` is the newest `created` date in the file.
 
 Authoritative sources:
 
 - [How Ubuntu is made: package archive](https://ubuntu.com/project/docs/how-ubuntu-is-made/concepts/package-archive/)
 - [List of Ubuntu releases](https://ubuntu.com/project/docs/release-team/list-of-releases/)
 - [Supported architectures](https://ubuntu.com/project/docs/how-ubuntu-is-made/concepts/supported-architectures/)
+- [distro-info-data](https://git.launchpad.net/ubuntu/+source/distro-info-data)
 
 ## Development
 
@@ -498,11 +550,11 @@ Run the same checks as CI:
 
 ```sh
 cargo fmt -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
-cargo build --locked --all-targets --all-features
-cargo test --locked --all-targets --all-features
-cargo test --locked --doc
+cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --locked --no-deps --all-features
+cargo build --workspace --locked --all-targets --all-features
+cargo test --workspace --locked --all-targets --all-features
+cargo test --workspace --locked --doc
 cargo audit
 ```
 

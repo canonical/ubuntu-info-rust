@@ -10,10 +10,10 @@ use crate::date::Date;
 /// The date against which the "current" iterators are evaluated.
 ///
 /// The crate contains static data and performs no I/O, so it cannot discover the
-/// current date at runtime. This constant is the date on which the series data
-/// was last verified. Use the `*_on` methods to evaluate a lifecycle phase on a
-/// different date.
-pub const REFERENCE_DATE: Date = Date::new(2026, 10, 20);
+/// current date at runtime. This constant is derived from the upstream data: the
+/// date the most recent series was created in `distro-info-data`. Use the
+/// `*_on` methods to evaluate a lifecycle phase on a different date.
+pub const REFERENCE_DATE: Date = Date::new(2026, 10, 16);
 
 /// Information about an Ubuntu series.
 ///
@@ -35,7 +35,10 @@ pub struct SeriesInfo {
     pub end_of_standard_support: Date,
     /// The last day of support, including ESM and legacy support where applicable.
     pub end_of_life: Date,
-    /// The first day of Expanded Security Maintenance, if the series has ESM.
+    /// The last day of standard support, after which Expanded Security
+    /// Maintenance begins, if the series has ESM.
+    ///
+    /// Dates are inclusive, so the first day of ESM is the day after this date.
     pub esm_start: Option<Date>,
     /// The first day of Ubuntu Pro legacy support, if the series has it.
     pub legacy_start: Option<Date>,
@@ -351,18 +354,19 @@ fn is_numeric(value: &str) -> bool {
 }
 
 fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    if value.len() >= prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        Some(&value[prefix.len()..])
+    let (candidate, remainder) = value.get(..prefix.len()).zip(value.get(prefix.len()..))?;
+    if candidate.eq_ignore_ascii_case(prefix) {
+        Some(remainder)
     } else {
         None
     }
 }
 
 fn strip_suffix_ignore_ascii_case<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
-    if value.len() >= suffix.len()
-        && value[value.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-    {
-        Some(&value[..value.len() - suffix.len()])
+    let suffix_start = value.len().checked_sub(suffix.len())?;
+    let (remainder, candidate) = value.get(..suffix_start).zip(value.get(suffix_start..))?;
+    if candidate.eq_ignore_ascii_case(suffix) {
+        Some(remainder)
     } else {
         None
     }
@@ -370,15 +374,18 @@ fn strip_suffix_ignore_ascii_case<'a>(value: &'a str, suffix: &str) -> Option<&'
 
 /// Every known Ubuntu series, ordered by release date.
 ///
-/// The data is current as of [`REFERENCE_DATE`]. Where an upstream source only
-/// specifies a month, start dates use the first day of the month and end dates
-/// use the last day of the month.
+/// The data is current as of [`REFERENCE_DATE`]. It is generated from the
+/// `distro-info-data` package's `ubuntu.csv` by the `codegen` tool; do not edit
+/// it by hand.
+///
+/// ESM begins when standard support ends, and legacy support begins in the month
+/// that ESM ends.
 pub static SERIES: &[SeriesInfo] = &[
     SeriesInfo {
         code_name: "Warty Warthog",
         code_name_short: "warty",
         version: "4.10",
-        release_date: Date::new(2004, 10, 26),
+        release_date: Date::new(2004, 10, 20),
         end_of_standard_support: Date::new(2006, 4, 30),
         end_of_life: Date::new(2006, 4, 30),
         esm_start: None,
@@ -423,8 +430,8 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name_short: "edgy",
         version: "6.10",
         release_date: Date::new(2006, 10, 26),
-        end_of_standard_support: Date::new(2008, 4, 26),
-        end_of_life: Date::new(2008, 4, 26),
+        end_of_standard_support: Date::new(2008, 4, 25),
+        end_of_life: Date::new(2008, 4, 25),
         esm_start: None,
         legacy_start: None,
         is_lts: false,
@@ -544,8 +551,8 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name_short: "precise",
         version: "12.04",
         release_date: Date::new(2012, 4, 26),
-        end_of_standard_support: Date::end_of_month(2017, 4),
-        end_of_life: Date::end_of_month(2019, 4),
+        end_of_standard_support: Date::new(2017, 4, 28),
+        end_of_life: Date::new(2019, 4, 26),
         esm_start: Some(Date::new(2017, 4, 28)),
         legacy_start: None,
         is_lts: true,
@@ -588,8 +595,8 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name_short: "trusty",
         version: "14.04",
         release_date: Date::new(2014, 4, 17),
-        end_of_standard_support: Date::end_of_month(2019, 4),
-        end_of_life: Date::end_of_month(2029, 4),
+        end_of_standard_support: Date::new(2019, 4, 25),
+        end_of_life: Date::new(2029, 4, 26),
         esm_start: Some(Date::new(2019, 4, 25)),
         legacy_start: Some(Date::new(2024, 4, 1)),
         is_lts: true,
@@ -632,9 +639,9 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name_short: "xenial",
         version: "16.04",
         release_date: Date::new(2016, 4, 21),
-        end_of_standard_support: Date::end_of_month(2021, 4),
-        end_of_life: Date::end_of_month(2031, 4),
-        esm_start: Some(Date::new(2021, 4, 1)),
+        end_of_standard_support: Date::new(2021, 4, 30),
+        end_of_life: Date::new(2031, 4, 30),
+        esm_start: Some(Date::new(2021, 4, 30)),
         legacy_start: Some(Date::new(2026, 4, 1)),
         is_lts: true,
     },
@@ -676,9 +683,9 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name_short: "bionic",
         version: "18.04",
         release_date: Date::new(2018, 4, 26),
-        end_of_standard_support: Date::end_of_month(2023, 6),
-        end_of_life: Date::end_of_month(2033, 4),
-        esm_start: Some(Date::new(2023, 6, 1)),
+        end_of_standard_support: Date::new(2023, 5, 31),
+        end_of_life: Date::new(2033, 4, 28),
+        esm_start: Some(Date::new(2023, 5, 31)),
         legacy_start: Some(Date::new(2028, 4, 1)),
         is_lts: true,
     },
@@ -720,9 +727,9 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name_short: "focal",
         version: "20.04",
         release_date: Date::new(2020, 4, 23),
-        end_of_standard_support: Date::end_of_month(2025, 5),
-        end_of_life: Date::end_of_month(2035, 4),
-        esm_start: Some(Date::new(2025, 6, 1)),
+        end_of_standard_support: Date::new(2025, 5, 29),
+        end_of_life: Date::new(2035, 4, 26),
+        esm_start: Some(Date::new(2025, 5, 29)),
         legacy_start: Some(Date::new(2030, 4, 1)),
         is_lts: true,
     },
@@ -764,8 +771,8 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name_short: "jammy",
         version: "22.04",
         release_date: Date::new(2022, 4, 21),
-        end_of_standard_support: Date::end_of_month(2027, 6),
-        end_of_life: Date::end_of_month(2037, 4),
+        end_of_standard_support: Date::new(2027, 6, 1),
+        end_of_life: Date::new(2037, 4, 30),
         esm_start: Some(Date::new(2027, 6, 1)),
         legacy_start: Some(Date::new(2032, 4, 1)),
         is_lts: true,
@@ -808,9 +815,9 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name_short: "noble",
         version: "24.04",
         release_date: Date::new(2024, 4, 25),
-        end_of_standard_support: Date::end_of_month(2029, 6),
-        end_of_life: Date::end_of_month(2039, 4),
-        esm_start: Some(Date::new(2029, 6, 1)),
+        end_of_standard_support: Date::new(2029, 5, 31),
+        end_of_life: Date::new(2039, 4, 28),
+        esm_start: Some(Date::new(2029, 5, 31)),
         legacy_start: Some(Date::new(2034, 4, 1)),
         is_lts: true,
     },
@@ -841,8 +848,8 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name_short: "questing",
         version: "25.10",
         release_date: Date::new(2025, 10, 9),
-        end_of_standard_support: Date::end_of_month(2026, 7),
-        end_of_life: Date::end_of_month(2026, 7),
+        end_of_standard_support: Date::new(2026, 7, 9),
+        end_of_life: Date::new(2026, 7, 9),
         esm_start: None,
         legacy_start: None,
         is_lts: false,
@@ -852,9 +859,9 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name_short: "resolute",
         version: "26.04",
         release_date: Date::new(2026, 4, 23),
-        end_of_standard_support: Date::end_of_month(2031, 5),
-        end_of_life: Date::end_of_month(2041, 4),
-        esm_start: Some(Date::new(2031, 5, 1)),
+        end_of_standard_support: Date::new(2031, 5, 29),
+        end_of_life: Date::new(2041, 4, 30),
+        esm_start: Some(Date::new(2031, 5, 29)),
         legacy_start: Some(Date::new(2036, 4, 1)),
         is_lts: true,
     },
@@ -863,8 +870,8 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name_short: "stonking",
         version: "26.10",
         release_date: Date::new(2026, 10, 15),
-        end_of_standard_support: Date::end_of_month(2027, 7),
-        end_of_life: Date::end_of_month(2027, 7),
+        end_of_standard_support: Date::new(2027, 7, 15),
+        end_of_life: Date::new(2027, 7, 15),
         esm_start: None,
         legacy_start: None,
         is_lts: false,
@@ -873,9 +880,9 @@ pub static SERIES: &[SeriesInfo] = &[
         code_name: "Tenacious T-Rex",
         code_name_short: "tenacious",
         version: "27.04",
-        release_date: Date::year_month(2027, 4),
-        end_of_standard_support: Date::end_of_month(2028, 1),
-        end_of_life: Date::end_of_month(2028, 1),
+        release_date: Date::new(2027, 4, 22),
+        end_of_standard_support: Date::new(2028, 1, 20),
+        end_of_life: Date::new(2028, 1, 20),
         esm_start: None,
         legacy_start: None,
         is_lts: false,
@@ -1063,7 +1070,7 @@ mod tests {
                 series.code_name_short
             );
             assert!(
-                full_names.insert(series.code_name),
+                full_names.insert(series.code_name.to_ascii_lowercase()),
                 "duplicate full name {}",
                 series.code_name
             );
@@ -1082,6 +1089,18 @@ mod tests {
 
             let full_name = series.code_name.to_ascii_lowercase();
             assert_eq!(FULL_NAME_INDEX.get(full_name.as_str()), Some(&index));
+        }
+    }
+
+    #[test]
+    fn every_series_roundtrips_through_version_lookup() {
+        for series in SERIES {
+            assert_eq!(
+                SeriesInfo::from_version(series.version),
+                Some(series),
+                "version {}",
+                series.version
+            );
         }
     }
 
@@ -1184,6 +1203,15 @@ mod tests {
             "26.10 LTS",
             "26.10.1",
             "99.99",
+            "üüüü",
+            "üabc",
+            "ü26.04",
+            "26.04ü",
+            "Ubuntu ü26.04",
+            "Ubuntu 26.04ü",
+            "26.04ü LTS",
+            "26.04 LTSü",
+            "üUbuntu 26.04 LTS",
         ] {
             assert!(SeriesInfo::from_version(input).is_none(), "input: {input}");
         }
@@ -1196,7 +1224,6 @@ mod tests {
             ("stonking", "stonking"),
             ("Resolute Raccoon", "resolute"),
             ("resolute", "resolute"),
-            ("devel", "tenacious"),
         ];
 
         for (input, expected) in cases {
@@ -1229,6 +1256,7 @@ mod tests {
         assert_eq!(devel.version, "27.04");
         assert!(devel.release_date > REFERENCE_DATE);
         assert_eq!(devel.lifecycle_on(REFERENCE_DATE), Lifecycle::Development);
+        assert_eq!(SeriesInfo::from_code_name("devel"), Some(devel));
     }
 
     #[test]
@@ -1236,87 +1264,68 @@ mod tests {
         let active: Vec<_> = SeriesInfo::active()
             .map(|series| series.code_name_short)
             .collect();
-        for expected in [
-            "trusty", "xenial", "bionic", "focal", "jammy", "noble", "resolute", "stonking",
-        ] {
-            assert!(
-                active.contains(&expected),
-                "missing active series {expected}"
-            );
-        }
-        for excluded in ["questing", "plucky", "tenacious"] {
-            assert!(
-                !active.contains(&excluded),
-                "unexpected active series {excluded}"
-            );
-        }
-
+        assert_eq!(
+            active,
+            [
+                "trusty", "xenial", "bionic", "focal", "jammy", "noble", "resolute", "stonking"
+            ]
+        );
         let esm: Vec<_> = SeriesInfo::esm()
             .map(|series| series.code_name_short)
             .collect();
         assert_eq!(esm, ["precise", "trusty", "xenial", "bionic", "focal"]);
-
         let current_esm: Vec<_> = SeriesInfo::current_esm()
             .map(|series| series.code_name_short)
             .collect();
         assert_eq!(current_esm, ["bionic", "focal"]);
-
         let legacy: Vec<_> = SeriesInfo::legacy()
             .map(|series| series.code_name_short)
             .collect();
         assert_eq!(legacy, ["trusty", "xenial"]);
-
         let current_legacy: Vec<_> = SeriesInfo::current_legacy()
             .map(|series| series.code_name_short)
             .collect();
         assert_eq!(current_legacy, ["trusty", "xenial"]);
-
         let eol: Vec<_> = SeriesInfo::end_of_life()
             .map(|series| series.code_name_short)
             .collect();
-        for expected in ["precise", "plucky", "questing"] {
-            assert!(eol.contains(&expected), "missing EOL series {expected}");
-        }
-        for excluded in ["trusty", "xenial", "bionic", "focal"] {
-            assert!(!eol.contains(&excluded), "unexpected EOL series {excluded}");
-        }
+        assert_eq!(
+            eol,
+            [
+                "warty", "hoary", "breezy", "dapper", "edgy", "feisty", "gutsy", "hardy",
+                "intrepid", "jaunty", "karmic", "lucid", "maverick", "natty", "oneiric", "precise",
+                "quantal", "raring", "saucy", "utopic", "vivid", "wily", "yakkety", "zesty",
+                "artful", "cosmic", "disco", "eoan", "groovy", "hirsute", "impish", "kinetic",
+                "lunar", "mantic", "oracular", "plucky", "questing"
+            ]
+        );
     }
 
     #[test]
     fn lifecycle_phases_are_reported() {
-        let resolute = SeriesInfo::from_version("26.04").unwrap();
+        let series = SeriesInfo::from_version("26.04").unwrap();
         assert_eq!(
-            resolute.lifecycle_on(REFERENCE_DATE),
+            series.lifecycle_on(series.release_date),
             Lifecycle::StandardSupport
         );
         assert_eq!(
-            resolute.lifecycle_on(Date::new(2032, 1, 1)),
-            Lifecycle::ExpandedSecurityMaintenance
-        );
-        assert_eq!(
-            resolute.lifecycle_on(Date::new(2037, 1, 1)),
-            Lifecycle::LegacySupport
-        );
-        assert_eq!(
-            resolute.lifecycle_on(Date::new(2042, 1, 1)),
-            Lifecycle::EndOfLife
-        );
-
-        let xenial = SeriesInfo::from_version("16.04").unwrap();
-        assert_eq!(
-            xenial.lifecycle_on(Date::new(2018, 1, 1)),
+            series.lifecycle_on(series.end_of_standard_support),
             Lifecycle::StandardSupport
         );
         assert_eq!(
-            xenial.lifecycle_on(Date::new(2022, 1, 1)),
+            series.lifecycle_on(Date::new(2031, 5, 30)),
             Lifecycle::ExpandedSecurityMaintenance
         );
         assert_eq!(
-            xenial.lifecycle_on(REFERENCE_DATE),
+            series.lifecycle_on(series.legacy_start.unwrap()),
             Lifecycle::LegacySupport
         );
         assert_eq!(
-            xenial.lifecycle_on(Date::new(2032, 1, 1)),
+            series.lifecycle_on(series.end_of_life),
+            Lifecycle::LegacySupport
+        );
+        assert_eq!(
+            series.lifecycle_on(Date::new(2041, 5, 1)),
             Lifecycle::EndOfLife
         );
     }

@@ -1,0 +1,756 @@
+//! Derives the crate's series data from `distro-info-data`'s `ubuntu.csv`.
+//!
+//! The upstream file has the columns `version`, `codename`, `series`,
+//! `created`, `release`, `eol`, `eol-server`, `eol-esm`, and `eol-legacy`. The
+//! columns after `eol` are optional and give the later end dates used by LTS
+//! series. They are *end* dates: `eol-esm` is the last day of Expanded Security
+//! Maintenance and `eol-legacy` is the last day of Ubuntu Pro legacy support.
+//!
+//! The derivation rules are:
+//!
+//! - `version` is the CSV version with the ` LTS` suffix removed, and `is_lts`
+//!   is whether the suffix was present.
+//! - `release_date` is the `release` column.
+//! - `end_of_standard_support` is `eol-server` when present, otherwise `eol`.
+//!   For LTS series before 12.04 the server lifecycle is the standard support
+//!   period; from 12.04 on the two columns agree.
+//! - `end_of_life` is the last end date present: `eol-legacy`, then `eol-esm`,
+//!   then `eol-server`, then `eol`.
+//! - `esm_start` is the end of standard support, for series that have an
+//!   `eol-esm` date: ESM begins when standard support ends.
+//! - `legacy_start` is the first day of the month in which ESM ends, for series
+//!   that have an `eol-legacy` date: legacy support begins in the month ESM
+//!   ends.
+//! - `REFERENCE_DATE` is the newest `created` date in the file: the date the
+//!   most recent series was added upstream.
+
+use serde::Deserialize;
+use time::{Date, format_description};
+
+/// The columns of `ubuntu.csv`, in order.
+const COLUMNS: [&str; 9] = [
+    "version",
+    "codename",
+    "series",
+    "created",
+    "release",
+    "eol",
+    "eol-server",
+    "eol-esm",
+    "eol-legacy",
+];
+
+/// One series, derived from a row of `ubuntu.csv`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Series {
+    /// The full code name, for example `"Warty Warthog"`.
+    pub code_name: String,
+    /// The short code name used in suites, for example `"warty"`.
+    pub code_name_short: String,
+    /// The version without the LTS suffix, for example `"4.10"`.
+    pub version: String,
+    /// The date of the initial release.
+    pub release_date: Date,
+    /// The last day of standard support.
+    pub end_of_standard_support: Date,
+    /// The last day of support, including ESM and legacy support.
+    pub end_of_life: Date,
+    /// The first day of Expanded Security Maintenance, if the series has ESM.
+    pub esm_start: Option<Date>,
+    /// The first day of Ubuntu Pro legacy support, if the series has it.
+    pub legacy_start: Option<Date>,
+    /// Whether the series is a Long Term Support (LTS) series.
+    pub is_lts: bool,
+}
+
+/// The complete dataset rendered into `src/series.rs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dataset {
+    /// The date the most recent series was created upstream.
+    pub reference_date: Date,
+    /// Every series, ordered by release date.
+    pub series: Vec<Series>,
+    /// Index into `series` of the earliest future release.
+    pub devel_index: usize,
+}
+
+/// One raw `ubuntu.csv` record, deserialized by column name.
+#[derive(Debug, Deserialize)]
+struct CsvRow {
+    version: String,
+    codename: String,
+    series: String,
+    created: String,
+    release: String,
+    eol: String,
+    #[serde(rename = "eol-server", default)]
+    eol_server: Option<String>,
+    #[serde(rename = "eol-esm", default)]
+    eol_esm: Option<String>,
+    #[serde(rename = "eol-legacy", default)]
+    eol_legacy: Option<String>,
+}
+
+/// A derived series plus the `created` date, which is only used to compute
+/// `REFERENCE_DATE`.
+#[derive(Debug, Clone)]
+struct Row {
+    created: Date,
+    series: Series,
+}
+
+/// Derives the dataset from the contents of `ubuntu.csv`.
+pub fn parse(csv_text: &str) -> Result<Dataset, String> {
+    // Tolerate a UTF-8 byte order mark, which some editors and proxies add.
+    let csv_text = csv_text.strip_prefix('\u{feff}').unwrap_or(csv_text);
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .from_reader(csv_text.as_bytes());
+    let headers = reader
+        .headers()
+        .map_err(|error| format!("cannot read ubuntu.csv header: {error}"))?
+        .clone();
+    if headers.len() != COLUMNS.len() || headers.iter().zip(COLUMNS).any(|(got, want)| got != want)
+    {
+        return Err(format!(
+            "unexpected ubuntu.csv header: expected {}",
+            COLUMNS.join(",")
+        ));
+    }
+
+    let mut rows = Vec::new();
+    for (index, result) in reader.records().enumerate() {
+        let record =
+            result.map_err(|error| format!("invalid CSV record {}: {error}", index + 2))?;
+        if record.len() > COLUMNS.len() {
+            return Err(format!(
+                "CSV record {} has {} fields; expected at most {}",
+                index + 2,
+                record.len(),
+                COLUMNS.len()
+            ));
+        }
+        let row = record
+            .deserialize(Some(&headers))
+            .map_err(|error| format!("invalid CSV record {}: {error}", index + 2))?;
+        rows.push(parse_row(row)?);
+    }
+
+    rows.sort_by_key(|a| a.series.release_date);
+    for pair in rows.windows(2) {
+        if pair[0].series.release_date == pair[1].series.release_date {
+            return Err(format!(
+                "{} and {} share the release date {}; series must have unique release dates",
+                pair[0].series.code_name_short,
+                pair[1].series.code_name_short,
+                pair[0].series.release_date
+            ));
+        }
+    }
+
+    validate_identifiers(&rows)?;
+
+    let reference_date = rows
+        .iter()
+        .map(|row| row.created)
+        .max()
+        .ok_or("ubuntu.csv contains no data rows")?;
+
+    let series: Vec<Series> = rows.into_iter().map(|row| row.series).collect();
+    let devel_index = series
+        .iter()
+        .position(|series| series.release_date > reference_date)
+        .ok_or(
+            "no series has a release date after the reference date; \
+             cannot determine the development series",
+        )?;
+
+    Ok(Dataset {
+        reference_date,
+        series,
+        devel_index,
+    })
+}
+
+fn parse_row(record: CsvRow) -> Result<Row, String> {
+    let version_raw = record.version.as_str();
+    let code_name = record.codename.as_str();
+    let code_name_short = record.series.as_str();
+    let created = record.created.as_str();
+    let release = record.release.as_str();
+    let eol = record.eol.as_str();
+    let eol_server = record.eol_server.as_deref().unwrap_or("");
+    let eol_esm = record.eol_esm.as_deref().unwrap_or("");
+    let eol_legacy = record.eol_legacy.as_deref().unwrap_or("");
+
+    let context = format!(
+        "series {} ({})",
+        if version_raw.is_empty() {
+            code_name
+        } else {
+            version_raw
+        },
+        code_name_short
+    );
+
+    let (version, is_lts) = match version_raw.strip_suffix(" LTS") {
+        Some(version) => (version, true),
+        None => (version_raw, false),
+    };
+    if version.is_empty() {
+        return Err(format!("{context}: missing version column"));
+    }
+    if !version.split_once('.').is_some_and(|(major, minor)| {
+        !major.is_empty()
+            && !minor.is_empty()
+            && major.bytes().all(|byte| byte.is_ascii_digit())
+            && minor.bytes().all(|byte| byte.is_ascii_digit())
+    }) {
+        return Err(format!(
+            "{context}: invalid version {version_raw:?}; expected numeric major.minor \
+             with an optional exact ' LTS' suffix"
+        ));
+    }
+    require(code_name, "codename", &context)?;
+    require(code_name_short, "series", &context)?;
+    if !code_name_short
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return Err(format!(
+            "{context}: the series name must be lowercase letters and digits; \
+             suite parsing splits on hyphens"
+        ));
+    }
+
+    let created = parse_date(require(created, "created", &context)?)
+        .map_err(|error| format!("{context}: {error}"))?;
+    let release_date = parse_date(require(release, "release", &context)?)
+        .map_err(|error| format!("{context}: {error}"))?;
+    let eol = parse_date(require(eol, "eol", &context)?)
+        .map_err(|error| format!("{context}: {error}"))?;
+    let eol_server = optional_date(eol_server, &context, "eol-server")?;
+    let eol_esm = optional_date(eol_esm, &context, "eol-esm")?;
+    let eol_legacy = optional_date(eol_legacy, &context, "eol-legacy")?;
+
+    if created > release_date {
+        return Err(format!(
+            "{context}: created date {created} is after release date {release_date}"
+        ));
+    }
+    if release_date > eol {
+        return Err(format!(
+            "{context}: release date {release_date} is after eol date {eol}"
+        ));
+    }
+    if let Some(eol_server) = eol_server
+        && eol > eol_server
+    {
+        return Err(format!(
+            "{context}: eol date {eol} is after eol-server date {eol_server}"
+        ));
+    }
+    let end_of_standard_support = eol_server.unwrap_or(eol);
+    if let Some(eol_esm) = eol_esm
+        && eol_esm < end_of_standard_support
+    {
+        return Err(format!(
+            "{context}: eol-esm date {eol_esm} is before the end of standard support \
+             {end_of_standard_support}"
+        ));
+    }
+    if let (Some(eol_esm), Some(eol_legacy)) = (eol_esm, eol_legacy)
+        && eol_esm > eol_legacy
+    {
+        return Err(format!(
+            "{context}: eol-esm date {eol_esm} is after eol-legacy date {eol_legacy}"
+        ));
+    }
+    if eol_legacy.is_some() && eol_esm.is_none() {
+        return Err(format!(
+            "{context}: eol-legacy is set without eol-esm; legacy support follows ESM"
+        ));
+    }
+
+    let end_of_life = eol_legacy.or(eol_esm).or(eol_server).unwrap_or(eol);
+    let esm_start = eol_esm.map(|_| end_of_standard_support);
+    let legacy_start = eol_legacy.is_some().then(|| {
+        let esm_end = eol_esm.expect("eol-legacy requires eol-esm");
+        Date::from_calendar_date(esm_end.year(), esm_end.month(), 1)
+            .expect("the first day of a month is valid")
+    });
+
+    if release_date > end_of_standard_support {
+        return Err(format!(
+            "{context}: release date {release_date} is after the end of standard support"
+        ));
+    }
+    if end_of_standard_support > end_of_life {
+        return Err(format!(
+            "{context}: end of standard support is after the end of life"
+        ));
+    }
+    if let Some(legacy_start) = legacy_start
+        && legacy_start > end_of_life
+    {
+        return Err(format!(
+            "{context}: legacy support starts after the end of life"
+        ));
+    }
+    if let (Some(esm_start), Some(legacy_start)) = (esm_start, legacy_start)
+        && esm_start >= legacy_start
+    {
+        return Err(format!(
+            "{context}: ESM would end before it starts; check the eol-server and eol-esm dates"
+        ));
+    }
+
+    Ok(Row {
+        created,
+        series: Series {
+            code_name: code_name.to_owned(),
+            code_name_short: code_name_short.to_owned(),
+            version: version.to_owned(),
+            release_date,
+            end_of_standard_support,
+            end_of_life,
+            esm_start,
+            legacy_start,
+            is_lts,
+        },
+    })
+}
+
+fn require<'a>(value: &'a str, column: &str, context: &str) -> Result<&'a str, String> {
+    if value.is_empty() {
+        Err(format!("{context}: missing {column} column"))
+    } else {
+        Ok(value)
+    }
+}
+
+fn parse_date(value: &str) -> Result<Date, String> {
+    let format = format_description::parse_borrowed::<3>("[year]-[month]-[day]")
+        .map_err(|error| format!("invalid date format description: {error}"))?;
+    Date::parse(value, &format).map_err(|_| format!("invalid date: {value}"))
+}
+
+fn optional_date(value: &str, context: &str, column: &str) -> Result<Option<Date>, String> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    parse_date(value)
+        .map(Some)
+        .map_err(|error| format!("{context}: {column}: {error}"))
+}
+
+fn validate_identifiers(rows: &[Row]) -> Result<(), String> {
+    let mut versions = std::collections::HashSet::new();
+    let mut short_names = std::collections::HashSet::new();
+    let mut full_names = std::collections::HashSet::new();
+
+    for row in rows {
+        let series = &row.series;
+        let context = format!("series {} ({})", series.version, series.code_name_short);
+        if !versions.insert(series.version.as_str()) {
+            return Err(format!("{context}: duplicate version {}", series.version));
+        }
+        if !short_names.insert(series.code_name_short.as_str()) {
+            return Err(format!(
+                "{context}: duplicate series name {}",
+                series.code_name_short
+            ));
+        }
+        if !full_names.insert(series.code_name.to_ascii_lowercase()) {
+            return Err(format!(
+                "{context}: duplicate code name {} (ASCII case-insensitive)",
+                series.code_name
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIXTURE: &str = "\
+version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
+4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30
+22.04 LTS,Jammy Jellyfish,jammy,2021-10-14,2022-04-21,2027-06-01,2027-06-01,2032-04-21,2037-04-30
+27.04,Tenacious T-Rex,tenacious,2026-10-16,2027-04-22,2028-01-20
+";
+
+    fn csv_with_row(row: &str) -> String {
+        format!(
+            "{}\n{row}\n\
+             27.04,Tenacious T-Rex,tenacious,2026-10-16,2027-04-22,2028-01-20\n",
+            COLUMNS.join(",")
+        )
+    }
+
+    #[test]
+    fn rejects_invalid_versions() {
+        for version in [
+            "22",
+            ".",
+            ".04",
+            "22.",
+            "22.04.1",
+            "22.04.1 LTS",
+            "Ubuntu 22.04",
+            "Ubuntu 22.04 LTS",
+            "a.04",
+            "22.b",
+            "２２.04",
+            "22.٠٤",
+            " 22.04",
+            "22.04 ",
+            "22.04 lts",
+            "22.04LTS",
+            "22.04  LTS",
+            "22.04 LTS LTS",
+            "22.04 LTS ",
+        ] {
+            let csv = csv_with_row(&format!(
+                "{version},Jammy Jellyfish,jammy,2021-10-14,2022-04-21,2027-06-01"
+            ));
+            let error = parse(&csv).unwrap_err();
+            assert_eq!(
+                error,
+                format!(
+                    "series {version} (jammy): invalid version {version:?}; \
+                     expected numeric major.minor with an optional exact ' LTS' suffix"
+                ),
+                "version: {version:?}"
+            );
+        }
+        for version in ["", " LTS"] {
+            let csv = csv_with_row(&format!(
+                "{version},Jammy Jellyfish,jammy,2021-10-14,2022-04-21,2027-06-01"
+            ));
+            let error = parse(&csv).unwrap_err();
+            let label = if version.is_empty() {
+                "Jammy Jellyfish"
+            } else {
+                version
+            };
+            assert_eq!(
+                error,
+                format!("series {label} (jammy): missing version column")
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_numeric_major_minor_versions() {
+        for (raw, version, is_lts) in [
+            ("4.10", "4.10", false),
+            ("22.04 LTS", "22.04", true),
+            ("0.0", "0.0", false),
+            ("123.456 LTS", "123.456", true),
+        ] {
+            let csv = csv_with_row(&format!(
+                "{raw},Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30"
+            ));
+            let dataset = parse(&csv).unwrap();
+            assert_eq!(dataset.series[0].version, version, "version: {raw}");
+            assert_eq!(dataset.series[0].is_lts, is_lts, "version: {raw}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_raw_chronology() {
+        for (dates, message) in [
+            (
+                "2022-04-22,2022-04-21,2027-06-01",
+                "created date 2022-04-22 is after release date 2022-04-21",
+            ),
+            (
+                "2021-10-14,2022-04-21,2022-04-20,2027-06-01,2032-04-21,2037-04-30",
+                "release date 2022-04-21 is after eol date 2022-04-20",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,2027-05-31,2032-04-21,2037-04-30",
+                "eol date 2027-06-01 is after eol-server date 2027-05-31",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,,2027-05-31,2037-04-30",
+                "eol-esm date 2027-05-31 is before the end of standard support 2027-06-01",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,2028-06-01,2028-05-31,2037-04-30",
+                "eol-esm date 2028-05-31 is before the end of standard support 2028-06-01",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,2027-06-01,2032-04-21,2032-04-20",
+                "eol-esm date 2032-04-21 is after eol-legacy date 2032-04-20",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,2027-06-01,2032-04-21,2031-04-30",
+                "eol-esm date 2032-04-21 is after eol-legacy date 2031-04-30",
+            ),
+            (
+                "2021-10-14,2022-04-21,2027-06-01,2027-06-01,,2037-04-30",
+                "eol-legacy is set without eol-esm; legacy support follows ESM",
+            ),
+        ] {
+            let csv = csv_with_row(&format!("22.04 LTS,Jammy Jellyfish,jammy,{dates}"));
+            let error = parse(&csv).unwrap_err();
+            assert_eq!(
+                error,
+                format!("series 22.04 LTS (jammy): {message}"),
+                "dates: {dates}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_equal_raw_dates_and_optional_trailing_columns() {
+        for (ends, standard, end_of_life, esm_start, legacy_start) in [
+            ("2022-04-21", "2022-04-21", "2022-04-21", None, None),
+            (
+                "2027-06-01,2027-06-01",
+                "2027-06-01",
+                "2027-06-01",
+                None,
+                None,
+            ),
+            (
+                "2027-06-01,,2027-06-01",
+                "2027-06-01",
+                "2027-06-01",
+                Some("2027-06-01"),
+                None,
+            ),
+            (
+                "2027-06-01,2027-06-01,2027-06-01",
+                "2027-06-01",
+                "2027-06-01",
+                Some("2027-06-01"),
+                None,
+            ),
+            (
+                "2027-06-01,2027-06-01,2032-04-21,2032-04-21",
+                "2027-06-01",
+                "2032-04-21",
+                Some("2027-06-01"),
+                Some("2032-04-01"),
+            ),
+        ] {
+            let csv = csv_with_row(&format!(
+                "22.04 LTS,Jammy Jellyfish,jammy,2022-04-21,2022-04-21,{ends}"
+            ));
+            let dataset = parse(&csv).unwrap();
+            let series = &dataset.series[0];
+            assert_eq!(series.end_of_standard_support.to_string(), standard);
+            assert_eq!(series.end_of_life.to_string(), end_of_life);
+            assert_eq!(
+                series.esm_start.map(|date| date.to_string()),
+                esm_start.map(str::to_owned)
+            );
+            assert_eq!(
+                series.legacy_start.map(|date| date.to_string()),
+                legacy_start.map(str::to_owned)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_case_insensitive_duplicate_full_names() {
+        for name in [
+            "Warty Warthog",
+            "warty warthog",
+            "WARTY WARTHOG",
+            "wArTy WaRtHoG",
+        ] {
+            let csv = csv_with_row(&format!(
+                "4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30\n\
+                 5.04,{name},hoary,2004-10-20,2005-04-08,2006-10-31"
+            ));
+            let error = parse(&csv).unwrap_err();
+            assert_eq!(
+                error,
+                format!("series 5.04 (hoary): duplicate code name {name} (ASCII case-insensitive)")
+            );
+        }
+    }
+
+    #[test]
+    fn derives_a_non_lts_series() {
+        let dataset = parse(FIXTURE).unwrap();
+        let warty = &dataset.series[0];
+        assert_eq!(warty.code_name, "Warty Warthog");
+        assert_eq!(warty.code_name_short, "warty");
+        assert_eq!(warty.version, "4.10");
+        assert_eq!(warty.release_date.to_string(), "2004-10-20");
+        assert_eq!(warty.end_of_standard_support.to_string(), "2006-04-30");
+        assert_eq!(warty.end_of_life.to_string(), "2006-04-30");
+        assert_eq!(warty.esm_start, None);
+        assert_eq!(warty.legacy_start, None);
+        assert!(!warty.is_lts);
+    }
+
+    #[test]
+    fn derives_an_lts_series_with_all_phases() {
+        let dataset = parse(FIXTURE).unwrap();
+        let jammy = &dataset.series[1];
+        assert_eq!(jammy.version, "22.04");
+        assert!(jammy.is_lts);
+        assert_eq!(jammy.end_of_standard_support.to_string(), "2027-06-01");
+        assert_eq!(jammy.end_of_life.to_string(), "2037-04-30");
+        assert_eq!(
+            jammy.esm_start.map(|date| date.to_string()),
+            Some("2027-06-01".to_owned())
+        );
+        assert_eq!(
+            jammy.legacy_start.map(|date| date.to_string()),
+            Some("2032-04-01".to_owned())
+        );
+    }
+
+    #[test]
+    fn orders_series_by_release_date() {
+        let dataset = parse(FIXTURE).unwrap();
+        let versions: Vec<&str> = dataset.series.iter().map(|s| s.version.as_str()).collect();
+        assert_eq!(versions, ["4.10", "22.04", "27.04"]);
+    }
+
+    #[test]
+    fn reference_date_is_the_newest_created_date() {
+        let dataset = parse(FIXTURE).unwrap();
+        assert_eq!(dataset.reference_date.to_string(), "2026-10-16");
+    }
+
+    #[test]
+    fn devel_is_the_earliest_future_release() {
+        let dataset = parse(FIXTURE).unwrap();
+        assert_eq!(dataset.devel_index, 2);
+        assert_eq!(dataset.series[2].code_name_short, "tenacious");
+    }
+
+    #[test]
+    fn lts_without_esm_uses_the_server_lifecycle() {
+        let csv = "\
+version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
+6.06 LTS,Dapper Drake,dapper,2005-10-12,2006-06-01,2009-07-14,2011-06-01
+";
+        let dataset = parse(csv).unwrap();
+        let dapper = &dataset.series[0];
+        assert!(dapper.is_lts);
+        assert_eq!(dapper.end_of_standard_support.to_string(), "2011-06-01");
+        assert_eq!(dapper.end_of_life.to_string(), "2011-06-01");
+        assert_eq!(dapper.esm_start, None);
+        assert_eq!(dapper.legacy_start, None);
+    }
+
+    #[test]
+    fn deserializes_quoted_fields_and_accepts_omitted_trailing_columns() {
+        let csv = "version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy\n\
+4.10,\"Warty, Warthog\",warty,2004-03-05,2004-10-20,2006-04-30\n\
+27.04,Tenacious T-Rex,tenacious,2026-10-16,2027-04-22,2028-01-20\n";
+        let dataset = parse(csv).unwrap();
+        assert_eq!(dataset.series[0].code_name, "Warty, Warthog");
+    }
+
+    #[test]
+    fn rejects_a_row_with_extra_fields() {
+        let csv = "version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy\n\
+4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30,,,,extra\n";
+        let error = parse(csv).unwrap_err();
+        assert!(error.contains("expected at most 9"), "error: {error}");
+    }
+
+    #[test]
+    fn rejects_a_header_mismatch() {
+        let csv = "version,codename\n4.10,Warty Warthog\n";
+        assert!(parse(csv).is_err());
+    }
+
+    #[test]
+    fn rejects_a_file_without_data_rows() {
+        let csv = "version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy\n";
+        let error = parse(csv).unwrap_err();
+        assert!(error.contains("no data rows"), "error: {error}");
+    }
+
+    #[test]
+    fn rejects_missing_required_columns() {
+        let csv = "\
+version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
+4.10,Warty Warthog,warty,2004-03-05,2004-10-20
+";
+        assert!(parse(csv).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_series() {
+        let csv = "\
+version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
+4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30
+4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30
+";
+        assert!(parse(csv).is_err());
+    }
+
+    #[test]
+    fn rejects_shared_release_dates() {
+        let csv = "\
+version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
+4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30
+5.04,Hoary Hedgehog,hoary,2004-10-20,2004-10-20,2006-10-31
+";
+        assert!(parse(csv).is_err());
+    }
+
+    #[test]
+    fn rejects_legacy_without_esm() {
+        let csv = "\
+version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
+22.04 LTS,Jammy Jellyfish,jammy,2021-10-14,2022-04-21,2027-06-01,2027-06-01,,2037-04-30
+";
+        assert!(parse(csv).is_err());
+    }
+
+    #[test]
+    fn rejects_an_invalid_date() {
+        let csv = "\
+version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
+4.10,Warty Warthog,warty,2004-03-05,2004-13-20,2006-04-30
+";
+        assert!(parse(csv).is_err());
+    }
+
+    #[test]
+    fn rejects_an_uppercase_series_name() {
+        let csv = "\
+version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
+4.10,Warty Warthog,Warty,2004-03-05,2004-10-20,2006-04-30
+";
+        assert!(parse(csv).is_err());
+    }
+
+    #[test]
+    fn rejects_a_release_after_standard_support() {
+        let csv = "\
+version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
+4.10,Warty Warthog,warty,2004-03-05,2007-10-20,2006-04-30
+";
+        assert!(parse(csv).is_err());
+    }
+
+    #[test]
+    fn rejects_a_dataset_without_a_future_release() {
+        let csv = "\
+version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
+4.10,Warty Warthog,warty,2004-10-20,2004-10-20,2006-04-30
+";
+        let error = parse(csv).unwrap_err();
+        assert!(
+            error.contains("cannot determine the development series"),
+            "error: {error}"
+        );
+    }
+}
