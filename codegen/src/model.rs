@@ -100,7 +100,7 @@ struct Row {
 }
 
 /// Derives the dataset from the contents of `ubuntu.csv`.
-pub fn derive(csv_text: &str) -> Result<Dataset, String> {
+pub fn parse(csv_text: &str) -> Result<Dataset, String> {
     // Tolerate a UTF-8 byte order mark, which some editors and proxies add.
     let csv_text = csv_text.strip_prefix('\u{feff}').unwrap_or(csv_text);
     let mut reader = csv::ReaderBuilder::new()
@@ -133,7 +133,7 @@ pub fn derive(csv_text: &str) -> Result<Dataset, String> {
         let row = record
             .deserialize(Some(&headers))
             .map_err(|error| format!("invalid CSV record {}: {error}", index + 2))?;
-        rows.push(derive_row(row)?);
+        rows.push(parse_row(row)?);
     }
 
     rows.sort_by_key(|a| a.series.release_date);
@@ -172,7 +172,7 @@ pub fn derive(csv_text: &str) -> Result<Dataset, String> {
     })
 }
 
-fn derive_row(record: CsvRow) -> Result<Row, String> {
+fn parse_row(record: CsvRow) -> Result<Row, String> {
     let version_raw = record.version.as_str();
     let code_name = record.codename.as_str();
     let code_name_short = record.series.as_str();
@@ -417,7 +417,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
             let csv = csv_with_row(&format!(
                 "{version},Jammy Jellyfish,jammy,2021-10-14,2022-04-21,2027-06-01"
             ));
-            let error = derive(&csv).unwrap_err();
+            let error = parse(&csv).unwrap_err();
             assert_eq!(
                 error,
                 format!(
@@ -431,7 +431,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
             let csv = csv_with_row(&format!(
                 "{version},Jammy Jellyfish,jammy,2021-10-14,2022-04-21,2027-06-01"
             ));
-            let error = derive(&csv).unwrap_err();
+            let error = parse(&csv).unwrap_err();
             let label = if version.is_empty() {
                 "Jammy Jellyfish"
             } else {
@@ -455,7 +455,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
             let csv = csv_with_row(&format!(
                 "{raw},Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30"
             ));
-            let dataset = derive(&csv).unwrap();
+            let dataset = parse(&csv).unwrap();
             assert_eq!(dataset.series[0].version, version, "version: {raw}");
             assert_eq!(dataset.series[0].is_lts, is_lts, "version: {raw}");
         }
@@ -498,7 +498,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
             ),
         ] {
             let csv = csv_with_row(&format!("22.04 LTS,Jammy Jellyfish,jammy,{dates}"));
-            let error = derive(&csv).unwrap_err();
+            let error = parse(&csv).unwrap_err();
             assert_eq!(
                 error,
                 format!("series 22.04 LTS (jammy): {message}"),
@@ -543,7 +543,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
             let csv = csv_with_row(&format!(
                 "22.04 LTS,Jammy Jellyfish,jammy,2022-04-21,2022-04-21,{ends}"
             ));
-            let dataset = derive(&csv).unwrap();
+            let dataset = parse(&csv).unwrap();
             let series = &dataset.series[0];
             assert_eq!(series.end_of_standard_support.to_string(), standard);
             assert_eq!(series.end_of_life.to_string(), end_of_life);
@@ -570,7 +570,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
                 "4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30\n\
                  5.04,{name},hoary,2004-10-20,2005-04-08,2006-10-31"
             ));
-            let error = derive(&csv).unwrap_err();
+            let error = parse(&csv).unwrap_err();
             assert_eq!(
                 error,
                 format!("series 5.04 (hoary): duplicate code name {name} (ASCII case-insensitive)")
@@ -580,7 +580,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn derives_a_non_lts_series() {
-        let dataset = derive(FIXTURE).unwrap();
+        let dataset = parse(FIXTURE).unwrap();
         let warty = &dataset.series[0];
         assert_eq!(warty.code_name, "Warty Warthog");
         assert_eq!(warty.code_name_short, "warty");
@@ -595,7 +595,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn derives_an_lts_series_with_all_phases() {
-        let dataset = derive(FIXTURE).unwrap();
+        let dataset = parse(FIXTURE).unwrap();
         let jammy = &dataset.series[1];
         assert_eq!(jammy.version, "22.04");
         assert!(jammy.is_lts);
@@ -613,20 +613,20 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn orders_series_by_release_date() {
-        let dataset = derive(FIXTURE).unwrap();
+        let dataset = parse(FIXTURE).unwrap();
         let versions: Vec<&str> = dataset.series.iter().map(|s| s.version.as_str()).collect();
         assert_eq!(versions, ["4.10", "22.04", "27.04"]);
     }
 
     #[test]
     fn reference_date_is_the_newest_created_date() {
-        let dataset = derive(FIXTURE).unwrap();
+        let dataset = parse(FIXTURE).unwrap();
         assert_eq!(dataset.reference_date.to_string(), "2026-10-16");
     }
 
     #[test]
     fn devel_is_the_earliest_future_release() {
-        let dataset = derive(FIXTURE).unwrap();
+        let dataset = parse(FIXTURE).unwrap();
         assert_eq!(dataset.devel_index, 2);
         assert_eq!(dataset.series[2].code_name_short, "tenacious");
     }
@@ -637,7 +637,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 6.06 LTS,Dapper Drake,dapper,2005-10-12,2006-06-01,2009-07-14,2011-06-01
 ";
-        let dataset = derive(csv).unwrap();
+        let dataset = parse(csv).unwrap();
         let dapper = &dataset.series[0];
         assert!(dapper.is_lts);
         assert_eq!(dapper.end_of_standard_support.to_string(), "2011-06-01");
@@ -651,7 +651,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
         let csv = "version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy\n\
 4.10,\"Warty, Warthog\",warty,2004-03-05,2004-10-20,2006-04-30\n\
 27.04,Tenacious T-Rex,tenacious,2026-10-16,2027-04-22,2028-01-20\n";
-        let dataset = derive(csv).unwrap();
+        let dataset = parse(csv).unwrap();
         assert_eq!(dataset.series[0].code_name, "Warty, Warthog");
     }
 
@@ -659,20 +659,20 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
     fn rejects_a_row_with_extra_fields() {
         let csv = "version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy\n\
 4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30,,,,extra\n";
-        let error = derive(csv).unwrap_err();
+        let error = parse(csv).unwrap_err();
         assert!(error.contains("expected at most 9"), "error: {error}");
     }
 
     #[test]
     fn rejects_a_header_mismatch() {
         let csv = "version,codename\n4.10,Warty Warthog\n";
-        assert!(derive(csv).is_err());
+        assert!(parse(csv).is_err());
     }
 
     #[test]
     fn rejects_a_file_without_data_rows() {
         let csv = "version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy\n";
-        let error = derive(csv).unwrap_err();
+        let error = parse(csv).unwrap_err();
         assert!(error.contains("no data rows"), "error: {error}");
     }
 
@@ -682,7 +682,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 4.10,Warty Warthog,warty,2004-03-05,2004-10-20
 ";
-        assert!(derive(csv).is_err());
+        assert!(parse(csv).is_err());
     }
 
     #[test]
@@ -692,7 +692,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30
 4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30
 ";
-        assert!(derive(csv).is_err());
+        assert!(parse(csv).is_err());
     }
 
     #[test]
@@ -702,7 +702,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 4.10,Warty Warthog,warty,2004-03-05,2004-10-20,2006-04-30
 5.04,Hoary Hedgehog,hoary,2004-10-20,2004-10-20,2006-10-31
 ";
-        assert!(derive(csv).is_err());
+        assert!(parse(csv).is_err());
     }
 
     #[test]
@@ -711,7 +711,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 22.04 LTS,Jammy Jellyfish,jammy,2021-10-14,2022-04-21,2027-06-01,2027-06-01,,2037-04-30
 ";
-        assert!(derive(csv).is_err());
+        assert!(parse(csv).is_err());
     }
 
     #[test]
@@ -720,7 +720,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 4.10,Warty Warthog,warty,2004-03-05,2004-13-20,2006-04-30
 ";
-        assert!(derive(csv).is_err());
+        assert!(parse(csv).is_err());
     }
 
     #[test]
@@ -729,7 +729,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 4.10,Warty Warthog,Warty,2004-03-05,2004-10-20,2006-04-30
 ";
-        assert!(derive(csv).is_err());
+        assert!(parse(csv).is_err());
     }
 
     #[test]
@@ -738,7 +738,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 4.10,Warty Warthog,warty,2004-03-05,2007-10-20,2006-04-30
 ";
-        assert!(derive(csv).is_err());
+        assert!(parse(csv).is_err());
     }
 
     #[test]
@@ -747,7 +747,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 4.10,Warty Warthog,warty,2004-10-20,2004-10-20,2006-04-30
 ";
-        let error = derive(csv).unwrap_err();
+        let error = parse(csv).unwrap_err();
         assert!(
             error.contains("cannot determine the development series"),
             "error: {error}"

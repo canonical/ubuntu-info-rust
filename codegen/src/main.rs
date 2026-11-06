@@ -58,7 +58,7 @@ fn run(args: Args) -> Result<String, String> {
 
     let csv_text = std::fs::read_to_string(csv_path)
         .map_err(|error| format!("cannot read {}: {error}", csv_path.display()))?;
-    let dataset = model::derive(&csv_text)?;
+    let dataset = model::parse(&csv_text)?;
     let rendered = emit::render(&dataset)
         .map_err(|error| format!("cannot render {}: {error}", output_path.display()))?;
 
@@ -263,10 +263,9 @@ fn write_atomically(path: &Path, contents: &str) -> Result<(), String> {
     let file_name = path
         .file_name()
         .ok_or_else(|| format!("invalid output path: {}", path.display()))?;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let temporary = parent.join(format!(
+    let temporary = path.with_file_name(format!(
         ".{}.{}.tmp",
-        file_name.to_string_lossy(),
+        file_name.display(),
         std::process::id()
     ));
 
@@ -281,7 +280,7 @@ fn write_atomically(path: &Path, contents: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::derive;
+    use crate::model::parse;
 
     const FIXTURE: &str = "\
 version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
@@ -347,7 +346,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn extracts_series_names_from_generated_output() {
-        let rendered = emit::render(&derive(FIXTURE).unwrap()).unwrap();
+        let rendered = emit::render(&parse(FIXTURE).unwrap()).unwrap();
         assert_eq!(
             series_names(&rendered).unwrap(),
             ["warty", "jammy", "tenacious"]
@@ -369,8 +368,8 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn refuses_to_remove_series() {
-        let existing = emit::render(&derive(FIXTURE).unwrap()).unwrap();
-        let truncated = derive(TRUNCATED).unwrap();
+        let existing = emit::render(&parse(FIXTURE).unwrap()).unwrap();
+        let truncated = parse(TRUNCATED).unwrap();
         let error =
             guard_against_removals(&existing, &truncated, Path::new("src/series.rs"), false)
                 .unwrap_err();
@@ -380,8 +379,8 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn allows_removals_when_requested() {
-        let existing = emit::render(&derive(FIXTURE).unwrap()).unwrap();
-        let truncated = derive(TRUNCATED).unwrap();
+        let existing = emit::render(&parse(FIXTURE).unwrap()).unwrap();
+        let truncated = parse(TRUNCATED).unwrap();
         assert!(
             guard_against_removals(&existing, &truncated, Path::new("src/series.rs"), true).is_ok()
         );
@@ -389,8 +388,8 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn accepts_an_unchanged_series_set() {
-        let existing = emit::render(&derive(FIXTURE).unwrap()).unwrap();
-        let dataset = derive(FIXTURE).unwrap();
+        let existing = emit::render(&parse(FIXTURE).unwrap()).unwrap();
+        let dataset = parse(FIXTURE).unwrap();
         assert!(
             guard_against_removals(&existing, &dataset, Path::new("src/series.rs"), false).is_ok()
         );

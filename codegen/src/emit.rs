@@ -414,7 +414,7 @@ fn lts_with_legacy(dataset: &Dataset) -> impl DoubleEndedIterator<Item = &Series
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::derive;
+    use crate::model::parse;
 
     const FIXTURE: &str = "\
 version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
@@ -425,20 +425,20 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn rendering_is_deterministic() {
-        let first = render(&derive(FIXTURE).unwrap()).unwrap();
-        let second = render(&derive(FIXTURE).unwrap()).unwrap();
+        let first = render(&parse(FIXTURE).unwrap()).unwrap();
+        let second = render(&parse(FIXTURE).unwrap()).unwrap();
         assert_eq!(first, second);
     }
 
     #[test]
     fn rendering_replaces_every_placeholder() {
-        let rendered = render(&derive(FIXTURE).unwrap()).unwrap();
+        let rendered = render(&parse(FIXTURE).unwrap()).unwrap();
         assert!(!rendered.contains("@@"));
     }
 
     #[test]
     fn default_template_rendering_is_byte_exact() {
-        let dataset = derive(FIXTURE).unwrap();
+        let dataset = parse(FIXTURE).unwrap();
         assert_eq!(
             render(&dataset).unwrap(),
             render_with_template(&dataset, TEMPLATE).unwrap()
@@ -447,7 +447,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn invalid_devel_index_is_an_error() {
-        let mut dataset = derive(FIXTURE).unwrap();
+        let mut dataset = parse(FIXTURE).unwrap();
         dataset.devel_index = dataset.series.len();
         let error = render(&dataset).unwrap_err();
         assert!(
@@ -458,7 +458,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn an_empty_dataset_is_an_error() {
-        let mut dataset = derive(FIXTURE).unwrap();
+        let mut dataset = parse(FIXTURE).unwrap();
         dataset.series.clear();
         dataset.devel_index = 0;
         let error = render(&dataset).unwrap_err();
@@ -470,7 +470,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn a_missing_legacy_phase_fixture_is_an_error() {
-        let dataset = derive(&FIXTURE.replace(",2032-04-21,2037-04-30", ",,")).unwrap();
+        let dataset = parse(&FIXTURE.replace(",2032-04-21,2037-04-30", ",,")).unwrap();
         let error = render(&dataset).unwrap_err();
         assert!(
             error
@@ -482,7 +482,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn a_phase_end_of_life_at_date_max_is_an_error() {
-        let mut dataset = derive(FIXTURE).unwrap();
+        let mut dataset = parse(FIXTURE).unwrap();
         dataset
             .series
             .iter_mut()
@@ -500,7 +500,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn a_missing_template_placeholder_is_an_error() {
-        let dataset = derive(FIXTURE).unwrap();
+        let dataset = parse(FIXTURE).unwrap();
         let template = TEMPLATE.replacen("@@REFERENCE_DATE@@", "", 1);
         let error = render_with_template(&dataset, &template).unwrap_err();
         assert!(
@@ -513,7 +513,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn a_duplicate_template_placeholder_is_an_error() {
-        let dataset = derive(FIXTURE).unwrap();
+        let dataset = parse(FIXTURE).unwrap();
         let template = TEMPLATE.replacen(
             "@@REFERENCE_DATE@@",
             "@@REFERENCE_DATE@@@@REFERENCE_DATE@@",
@@ -530,7 +530,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn an_unfilled_template_placeholder_is_an_error() {
-        let dataset = derive(FIXTURE).unwrap();
+        let dataset = parse(FIXTURE).unwrap();
         let template = format!("{TEMPLATE}\n@@UNFILLED@@");
         let error = render_with_template(&dataset, &template).unwrap_err();
         assert!(
@@ -543,7 +543,7 @@ version,codename,series,created,release,eol,eol-server,eol-esm,eol-legacy
 
     #[test]
     fn lines_fit_the_rustfmt_width() {
-        let rendered = render(&derive(FIXTURE).unwrap()).unwrap();
+        let rendered = render(&parse(FIXTURE).unwrap()).unwrap();
         for line in rendered.lines() {
             assert!(
                 line.chars().count() <= MAX_WIDTH,
