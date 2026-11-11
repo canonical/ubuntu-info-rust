@@ -112,7 +112,7 @@ dependencies = [
  "csv",
  "iso3166-static",
  "serde",
- "syn 2.0.119",
+ "syn 3.0.9",
  "tempfile",
  "time",
 ]
