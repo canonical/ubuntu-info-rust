@@ -21,6 +21,8 @@ These instructions are based on [The Rust Book](https://doc.rust-lang.org/book/)
 - Use consistent naming conventions following [RFC 430](https://github.com/rust-lang/rfcs/blob/master/text/0430-finalizing-naming-conventions.md).
 - Write idiomatic, safe, and efficient Rust code that follows the borrow checker's rules.
 - Ensure code compiles without warnings.
+- When editing documentation, ensure that every statement makes sense in the context of that document/section and the current state of the documented system. Avoid negative statements saying something about what the system does not do.
+- Do not create custom types, functions, or libraries when mature, ready-to-use crates are available in the Rust ecosystem.  See https://blessed.rs/crates for recommended crates or ask the user if unsure.
 
 ## Patterns to Follow
 
